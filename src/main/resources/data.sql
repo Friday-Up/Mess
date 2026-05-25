@@ -1,0 +1,3 @@
+INSERT INTO USER (USERNAME, EMAIL, NAME, CREATED_AT) VALUES ('admin', 'admin@example.com', 'Administrator', CURRENT_TIMESTAMP());
+INSERT INTO USER (USERNAME, EMAIL, NAME, CREATED_AT) VALUES ('john', 'john@example.com', 'John Doe', CURRENT_TIMESTAMP());
+INSERT INTO USER (USERNAME, EMAIL, NAME, CREATED_AT) VALUES ('jane', 'jane@example.com', 'Jane Smith', CURRENT_TIMESTAMP());
