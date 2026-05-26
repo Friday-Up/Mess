@@ -3,23 +3,168 @@ package com.example.mess.controller;
 import com.example.mess.dto.ApiResponse;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.bind.annotation.RestController;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.web.bind.annotation.*;
 
+/**
+ * 问候控制器
+ * 提供简单的问候API接口，用于演示基本的Spring Boot功能
+ * 
+ * @RestController 组合注解，包含@Controller和@ResponseBody
+ * @RequestMapping 定义基础路径为/hello
+ * @Tag Swagger文档标签，用于API分组
+ * 
+ * 作者: zhangyaolong.5
+ * 创建时间: 2026-05-26
+ * 
+ * 功能说明:
+ * - 提供基本的问候API
+ * - 支持自定义问候对象
+ * - 返回统一的API响应格式
+ * 
+ * 使用场景:
+ * - 快速测试API是否正常工作
+ * - 演示基本的控制器功能
+ * - 作为健康检查的简单端点
+ */
 @RestController
-@Tag(name = "基础接口", description = "基础问候接口")
+@RequestMapping("/hello")
+@Tag(name = "问候服务", description = "简单的问候API，用于测试和演示")
 public class HelloController {
 
-    @GetMapping("/")
-    @Operation(summary = "首页", description = "返回欢迎信息")
-    public ApiResponse<String> index() {
-        return ApiResponse.success("Hello, Spring Boot!");
+    private static final Logger log = LoggerFactory.getLogger(HelloController.class);
+
+    /**
+     * 简单的问候接口
+     * 
+     * @param name 问候对象的名称，默认为"World"
+     * @return ApiResponse<String> 包含问候语的响应
+     * 
+     * HTTP方法: GET
+     * 访问路径: /hello
+     * 权限要求: 公开访问（无认证要求）
+     * 
+     * 示例调用:
+     * GET /hello
+     * GET /hello?name=Spring
+     * GET /hello?name=World&version=1.0
+     * 
+     * 示例响应:
+     * {
+     *   "success": true,
+     *   "message": "Success",
+     *   "data": "Hello, World!",
+     *   "timestamp": "2026-05-26T10:30:00"
+     * }
+     * 
+     * 日志说明: 记录请求参数和响应时间，用于调试和监控
+     */
+    @GetMapping
+    @Operation(
+        summary = "简单问候", 
+        description = "根据名称返回问候语，name参数可选，默认为'World'"
+    )
+    public ApiResponse<String> hello(@RequestParam(defaultValue = "World") String name) {
+        // 构建并返回个性化的问候语
+        // 使用String.format可以提高性能和可读性
+        String greeting = String.format("Hello, %s!", name);
+        
+        log.info("收到问候请求，问候对象: {}", name);
+        
+        // 返回统一格式的API响应
+        // 使用ApiResponse.success方法创建成功响应
+        return ApiResponse.success(greeting);
     }
 
-    @GetMapping("/hello")
-    @Operation(summary = "问候接口", description = "根据名称返回问候语")
-    public ApiResponse<String> hello(@RequestParam(defaultValue = "World") String name) {
-        return ApiResponse.success("Hello, " + name + "!");
+    /**
+     * 高级问候接口
+     * 
+     * @param name 问候对象的名称
+     * @param version API版本号
+     * @return ApiResponse<String> 包含高级问候语的响应
+     * 
+     * HTTP方法: GET
+     * 访问路径: /hello/advanced
+     * 权限要求: 公开访问（无认证要求）
+     * 
+     * 示例调用:
+     * GET /hello/advanced?name=Spring&version=2.0
+     * 
+     * 示例响应:
+     * {
+     *   "success": true,
+     *   "message": "Success",
+     *   "data": "Hello, Spring! Welcome to API v2.0",
+     *   "timestamp": "2026-05-26T10:30:00"
+     * }
+     * 
+     * 功能扩展: 可以根据版本号提供不同的问候格式
+     */
+    @GetMapping("/advanced")
+    @Operation(
+        summary = "高级问候", 
+        description = "根据名称和版本返回高级问候语"
+    )
+    public ApiResponse<String> advancedHello(
+            @RequestParam(defaultValue = "World") String name,
+            @RequestParam(defaultValue = "1.0") String version) {
+        
+        // 根据版本号构建不同格式的问候语
+        String greeting;
+        if ("2.0".equals(version)) {
+            greeting = String.format("Hello, %s! Welcome to API v%s", name, version);
+        } else {
+            greeting = String.format("Hello, %s! (API v%s)", name, version);
+        }
+        
+        log.info("收到高级问候请求，问候对象: {}, 版本: {}", name, version);
+        
+        // 返回统一格式的API响应
+        return ApiResponse.success(greeting);
+    }
+
+    /**
+     * POST方式的问候接口
+     * 
+     * @param name 问候对象的名称
+     * @return ApiResponse<String> 包含问候语的响应
+     * 
+     * HTTP方法: POST
+     * 访问路径: /hello
+     * 权限要求: 公开访问（无认证要求）
+     * 
+     * 示例调用:
+     * POST /hello
+     * Content-Type: application/json
+     * 
+     * 请求体:
+     * {
+     *   "name": "Spring Boot"
+     * }
+     * 
+     * 示例响应:
+     * {
+     *   "success": true,
+     *   "message": "Success",
+     *   "data": "Hello, Spring Boot!",
+     *   "timestamp": "2026-05-26T10:30:00"
+     * }
+     * 
+     * 使用场景: 演示POST请求的处理
+     */
+    @PostMapping
+    @Operation(
+        summary = "POST问候", 
+        description = "通过POST请求发送问候"
+    )
+    public ApiResponse<String> helloPost(@RequestParam(defaultValue = "World") String name) {
+        // 构建问候语
+        String greeting = String.format("Hello, %s! (via POST)", name);
+        
+        log.info("收到POST问候请求，问候对象: {}", name);
+        
+        // 返回统一格式的API响应
+        return ApiResponse.success(greeting);
     }
 }
