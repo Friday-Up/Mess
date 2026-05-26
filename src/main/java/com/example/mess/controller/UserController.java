@@ -31,9 +31,15 @@ public class UserController {
     }
 
     @GetMapping
-    @Operation(summary = "获取所有用户", description = "返回所有用户的列表")
-    public ApiResponse<List<User>> getAllUsers() {
-        List<User> users = userService.getAllUsers();
+    @Operation(summary = "获取所有用户", description = "返回所有用户的列表，支持分页")
+    public ApiResponse<Page<User>> getAllUsers(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "10") int size,
+            @RequestParam(defaultValue = "id") String sort,
+            @RequestParam(defaultValue = "asc") String direction) {
+        
+        Pageable pageable = Pageable.ofSize(size).withPage(page);
+        Page<User> users = userService.getAllUsers(pageable);
         return ApiResponse.success("获取用户列表成功", users);
     }
 
