@@ -17,16 +17,6 @@ import org.springframework.web.bind.annotation.*;
  * 
  * 作者: zhangyaolong.5
  * 创建时间: 2026-05-26
- * 
- * 功能说明:
- * - 提供基本的问候API
- * - 支持自定义问候对象
- * - 返回统一的API响应格式
- * 
- * 使用场景:
- * - 快速测试API是否正常工作
- * - 演示基本的控制器功能
- * - 作为健康检查的简单端点
  */
 @RestController
 @RequestMapping("/hello")
@@ -43,22 +33,7 @@ public class HelloController {
      * 
      * HTTP方法: GET
      * 访问路径: /hello
-     * 权限要求: 公开访问（无认证要求）
-     * 
-     * 示例调用:
-     * GET /hello
-     * GET /hello?name=Spring
-     * GET /hello?name=World&version=1.0
-     * 
-     * 示例响应:
-     * {
-     *   "success": true,
-     *   "message": "Success",
-     *   "data": "Hello, World!",
-     *   "timestamp": "2026-05-26T10:30:00"
-     * }
-     * 
-     * 日志说明: 记录请求参数和响应时间，用于调试和监控
+     * 权限要求: 公开访问
      */
     @GetMapping
     @Operation(
@@ -67,13 +42,10 @@ public class HelloController {
     )
     public ApiResponse<String> hello(@RequestParam(defaultValue = "World") String name) {
         // 构建并返回个性化的问候语
-        // 使用String.format可以提高性能和可读性
         String greeting = String.format("Hello, %s!", name);
         
         log.info("收到问候请求，问候对象: {}", name);
         
-        // 返回统一格式的API响应
-        // 使用ApiResponse.success方法创建成功响应
         return ApiResponse.success(greeting);
     }
 
@@ -86,20 +58,7 @@ public class HelloController {
      * 
      * HTTP方法: GET
      * 访问路径: /hello/advanced
-     * 权限要求: 公开访问（无认证要求）
-     * 
-     * 示例调用:
-     * GET /hello/advanced?name=Spring&version=2.0
-     * 
-     * 示例响应:
-     * {
-     *   "success": true,
-     *   "message": "Success",
-     *   "data": "Hello, Spring! Welcome to API v2.0",
-     *   "timestamp": "2026-05-26T10:30:00"
-     * }
-     * 
-     * 功能扩展: 可以根据版本号提供不同的问候格式
+     * 权限要求: 公开访问
      */
     @GetMapping("/advanced")
     @Operation(
@@ -120,7 +79,6 @@ public class HelloController {
         
         log.info("收到高级问候请求，问候对象: {}, 版本: {}", name, version);
         
-        // 返回统一格式的API响应
         return ApiResponse.success(greeting);
     }
 
@@ -132,26 +90,7 @@ public class HelloController {
      * 
      * HTTP方法: POST
      * 访问路径: /hello
-     * 权限要求: 公开访问（无认证要求）
-     * 
-     * 示例调用:
-     * POST /hello
-     * Content-Type: application/json
-     * 
-     * 请求体:
-     * {
-     *   "name": "Spring Boot"
-     * }
-     * 
-     * 示例响应:
-     * {
-     *   "success": true,
-     *   "message": "Success",
-     *   "data": "Hello, Spring Boot!",
-     *   "timestamp": "2026-05-26T10:30:00"
-     * }
-     * 
-     * 使用场景: 演示POST请求的处理
+     * 权限要求: 公开访问
      */
     @PostMapping
     @Operation(
@@ -164,7 +103,6 @@ public class HelloController {
         
         log.info("收到POST问候请求，问候对象: {}", name);
         
-        // 返回统一格式的API响应
         return ApiResponse.success(greeting);
     }
 }
