@@ -1,47 +1,127 @@
+# ============================================================
+# Docker Compose 编排配置文件
+# 
+# 定义了Mess应用的多容器部署架构，包括：
+# - mess-app: Spring Boot应用服务
+# - redis: 缓存服务
+# - postgres: 数据库服务（可选，生产环境使用）
+# 
+# 使用方式:
+#   开发环境: docker-compose up -d redis
+#   完整环境: docker-compose up -d
+#   生产环境: docker-compose --profile prod up -d
+# 
+# 注意事项:
+# - 首次运行需要先构建应用: mvn clean package
+# - 数据持久化通过Docker Volume实现
+# - 服务间通过mess-network网络通信
+# 
+# 作者: zhangyaolong.5
+# 创建时间: 2026-05-26
+# ============================================================
+
+# Docker Compose文件格式版本
+# 3.8支持大多数现代Docker特性
 version: '3.8'
 
+# -----------------------------------------------------------
+# 服务定义
+# 每个服务对应一个容器实例
+# -----------------------------------------------------------
 services:
+
+  # -------------------------------------------------------
+  # Mess Spring Boot 应用服务
+  # 基于项目根目录的Dockerfile构建镜像
+  # -------------------------------------------------------
   mess-app:
+    # 使用当前目录的Dockerfile构建镜像
     build: .
+    # 端口映射: 宿主机端口:容器端口
+    # 8080是Spring Boot默认端口
     ports:
       - "8080:8080"
+    # 环境变量配置
     environment:
+      # 激活dev环境配置（生产环境改为prod）
       - SPRING_PROFILES_ACTIVE=dev
+      # Redis主机地址，指向redis服务
       - SPRING_REDIS_HOST=redis
+      # Redis端口
       - SPRING_REDIS_PORT=6379
+    # 服务依赖：应用服务依赖Redis服务
+    # 确保Redis先启动再启动应用
     depends_on:
       - redis
+    # 加入mess-network网络，服务间可通过服务名互相访问
     networks:
       - mess-network
 
+  # -------------------------------------------------------
+  # Redis 缓存服务
+  # 使用Redis 7 Alpine精简镜像
+  # 开启AOF持久化，防止数据丢失
+  # -------------------------------------------------------
   redis:
+    # Redis镜像版本，Alpine版本体积更小
     image: redis:7-alpine
+    # 端口映射: 宿主机6379:容器6379
     ports:
       - "6379:6379"
+    # Redis启动命令:
+    # --appendonly yes: 开启AOF持久化，将写操作记录到文件
+    # 重启后可从AOF文件恢复数据
     command: redis-server --appendonly yes
+    # 数据卷挂载: 将Redis数据持久化到宿主机
     volumes:
       - redis-data:/data
+    # 加入mess-network网络
     networks:
       - mess-network
 
+  # -------------------------------------------------------
+  # PostgreSQL 数据库服务（可选）
+  # 生产环境替代H2内存数据库
+  # 开发环境默认不启动
+  # -------------------------------------------------------
   # PostgreSQL for production (optional)
   postgres:
+    # PostgreSQL镜像版本，Alpine版本体积更小
     image: postgres:15-alpine
+    # 端口映射: 宿主机5432:容器5432
     ports:
       - "5432:5432"
+    # 环境变量配置
     environment:
+      # 数据库名称
       - POSTGRES_DB=mess
+      # 数据库超级用户
       - POSTGRES_USER=postgres
+      # 数据库密码（生产环境应使用Docker Secret或环境变量注入）
       - POSTGRES_PASSWORD=password
+    # 数据卷挂载: 将PostgreSQL数据持久化到宿主机
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    # 加入mess-network网络
     networks:
       - mess-network
 
+# -----------------------------------------------------------
+# 数据卷定义
+# 用于持久化存储容器数据，即使容器删除数据也不会丢失
+# -----------------------------------------------------------
 volumes:
+  # Redis数据卷，存储AOF持久化文件
   redis-data:
+  # PostgreSQL数据卷，存储数据库文件
   postgres-data:
 
+# -----------------------------------------------------------
+# 网络定义
+# 使用bridge驱动，服务间可通过服务名互相通信
+# -----------------------------------------------------------
 networks:
   mess-network:
+    # bridge驱动: 创建独立的桥接网络
+    # 容器间可通过服务名互相访问，外部无法直接访问
     driver: bridge

@@ -1,53 +1,156 @@
+# ============================================================
+# Mess 应用主配置文件
+# 
+# 本文件是Spring Boot应用的主配置文件，定义了所有核心配置。
+# 使用profile机制支持不同环境（dev/prod）的差异化配置。
+# 
+# 配置优先级（从高到低）:
+# 1. 命令行参数
+# 2. 系统属性
+# 3. 环境变量
+# 4. application-{profile}.yml（环境特定配置）
+# 5. application.yml（主配置，当前文件）
+# 
+# 当前激活的profile: dev（开发环境）
+# 生产环境请切换为: prod
+# 
+# 作者: zhangyaolong.5
+# 创建时间: 2026-05-26
+# ============================================================
+
+# -----------------------------------------------------------
+# 服务器配置
+# port: 应用监听的端口号，默认8080
+# -----------------------------------------------------------
 server:
   port: 8080
 
+# -----------------------------------------------------------
+# Spring框架配置
+# -----------------------------------------------------------
 spring:
+  # 应用名称，用于服务注册和日志标识
   application:
     name: mess
+
+  # 激活的Profile，决定加载哪个环境配置文件
+  # dev: 开发环境（H2内存数据库，简单缓存，DEBUG日志）
+  # prod: 生产环境（PostgreSQL，Redis缓存，INFO日志）
   profiles:
     active: dev
+
+  # -------------------------------------------------------
+  # 数据源配置（默认使用H2内存数据库）
+  # 开发环境使用H2，生产环境使用PostgreSQL
+  # -------------------------------------------------------
   datasource:
+    # H2内存数据库连接URL
+    # MEM:testdb 表示使用内存模式，应用重启后数据丢失
     url: jdbc:h2:mem:testdb
+    # H2数据库驱动类
     driver-class-name: org.h2.Driver
+    # 数据库用户名
     username: sa
+    # 数据库密码
     password: password
+
+  # -------------------------------------------------------
+  # H2数据库控制台配置
+  # 开发环境下可通过浏览器访问H2控制台查看数据库
+  # 访问地址: http://localhost:8080/h2-console
+  # -------------------------------------------------------
   h2:
     console:
+      # 启用H2控制台（仅开发环境使用，生产环境应禁用）
       enabled: true
+      # H2控制台访问路径
       path: /h2-console
+
+  # -------------------------------------------------------
+  # JPA/Hibernate配置
+  # -------------------------------------------------------
   jpa:
+    # 数据库方言，告诉Hibernate如何生成优化的SQL
     database-platform: org.hibernate.dialect.H2Dialect
+    # DDL自动策略:
+    # create-drop: 启动时创建表，关闭时删除表（适合开发测试）
+    # update: 启动时更新表结构（适合开发迭代）
+    # validate: 只验证表结构，不修改（适合生产环境）
+    # none: 不做任何操作
     hibernate:
       ddl-auto: create-drop
+    # 是否在日志中打印SQL语句（开发环境开启，生产环境关闭）
     show-sql: true
+    # 延迟数据源初始化，确保schema.sql和data.sql在Hibernate之后执行
     defer-datasource-initialization: true
+
+  # -------------------------------------------------------
+  # 缓存配置
+  # simple: 使用简单的内存缓存（ConcurrentMapCacheManager）
+  # redis: 使用Redis作为分布式缓存（生产环境推荐）
+  # -------------------------------------------------------
   cache:
     type: simple
+
+  # -------------------------------------------------------
+  # Redis配置（生产环境使用，开发环境可选）
+  # -------------------------------------------------------
   redis:
+    # Redis服务器地址
     host: localhost
+    # Redis服务器端口
     port: 6379
+    # 连接超时时间
     timeout: 2000ms
+    # Lettuce连接池配置
     lettuce:
       pool:
+        # 最大活跃连接数
         max-active: 8
+        # 最大空闲连接数
         max-idle: 8
+        # 最小空闲连接数
         min-idle: 0
 
+# -----------------------------------------------------------
+# Spring Boot Actuator 监控配置
+# 提供应用健康检查、指标监控等运维能力
+# -----------------------------------------------------------
 management:
+  # 端点暴露配置
   endpoints:
     web:
       exposure:
+        # 暴露的端点列表:
+        # health: 健康检查
+        # info: 应用信息
+        # metrics: 性能指标
+        # env: 环境变量
+        # beans: Spring Bean列表
+        # configprops: 配置属性
+        # loggers: 日志配置
         include: health,info,metrics,env,beans,configprops,loggers
+  # 端点详细配置
   endpoint:
     health:
+      # 始终显示健康检查详情（生产环境应设为when-authorized）
       show-details: always
+  # 应用信息端点配置
   info:
     env:
       enabled: true
 
+# -----------------------------------------------------------
+# 应用信息配置
+# 通过 /actuator/info 端点暴露
+# -----------------------------------------------------------
 info:
   app:
+    # 应用名称
     name: Mess
+    # 应用描述
     description: Spring Boot Demo Project
+    # 应用版本号（遵循语义化版本规范）
     version: 1.0.0
+    # 应用作者
     author: zhangyaolong.5
