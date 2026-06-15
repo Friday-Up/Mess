@@ -1,39 +1,122 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- ============================================================
+     Logback 日志配置文件
+     
+     为Mess应用提供基于Spring Profile的日志配置。
+     不同环境使用不同的日志输出方式和级别。
+     
+     配置策略:
+     - 开发环境(dev): 输出到控制台，DEBUG级别
+     - 生产环境(prod): 输出到文件，INFO级别，支持滚动
+     
+     日志格式:
+     %d{yyyy-MM-dd HH:mm:ss.SSS} - 时间戳
+     [%thread] - 线程名
+     %-5level - 日志级别（左对齐，5字符宽度）
+     %logger{36} - Logger名称（最长36字符）
+     %msg - 日志消息
+     %n - 换行符
+     
+     滚动策略:
+     - 按日期和大小滚动
+     - 单文件最大10MB
+     - 保留30天历史日志
+     - 总日志大小上限1GB
+     
+     作者: zhangyaolong.5
+     创建时间: 2026-05-26
+     ============================================================ -->
 <configuration>
+    <!-- 引入Spring Boot默认的Logback配置
+         提供默认的转换器、格式器等基础配置 -->
     <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
     
+    <!-- ============================================================
+         开发环境日志配置 (dev profile)
+         输出到控制台，便于实时查看日志
+         ============================================================ -->
     <springProfile name="dev">
+        <!-- 控制台日志输出器
+             将日志输出到标准输出（System.out）
+             适合开发环境实时查看 -->
         <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+            <!-- 日志格式编码器
+                 定义日志输出的格式模式 -->
             <encoder>
+                <!-- 日志格式:
+                     时间戳 [线程名] 级别 Logger名 - 消息 -->
                 <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
             </encoder>
         </appender>
         
+        <!-- 根日志级别: DEBUG
+             开发环境输出所有调试信息 -->
         <root level="DEBUG">
+            <!-- 引用控制台输出器 -->
             <appender-ref ref="CONSOLE"/>
         </root>
     </springProfile>
     
+    <!-- ============================================================
+         生产环境日志配置 (prod profile)
+         输出到文件，支持滚动和归档
+         ============================================================ -->
     <springProfile name="prod">
+        <!-- 滚动文件日志输出器
+             将日志输出到文件，支持按时间和大小滚动
+             避免单个日志文件过大 -->
         <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+            <!-- 当前日志文件路径
+                 所有日志先写入此文件 -->
             <file>logs/app.log</file>
+            
+            <!-- 滚动策略: 基于时间和大小
+                 同时满足日期变更或文件大小超限时滚动 -->
             <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+                <!-- 归档日志文件名模式
+                     %d{yyyy-MM-dd}: 日期
+                     %i: 滚动序号（同一天内多次滚动时递增） -->
                 <fileNamePattern>logs/app.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+                <!-- 单个日志文件最大大小
+                     超过此大小将触发滚动，创建新文件 -->
                 <maxFileSize>10MB</maxFileSize>
+                <!-- 保留的历史日志文件天数
+                     超过此天数的归档日志将被自动删除 -->
                 <maxHistory>30</maxHistory>
+                <!-- 所有归档日志文件总大小上限
+                     超过此上限将删除最旧的归档文件 -->
                 <totalSizeCap>1GB</totalSizeCap>
             </rollingPolicy>
+            
+            <!-- 日志格式编码器（与开发环境相同格式） -->
             <encoder>
                 <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
             </encoder>
         </appender>
         
+        <!-- 根日志级别: INFO
+             生产环境只输出重要信息，减少日志量 -->
         <root level="INFO">
+            <!-- 引用文件输出器 -->
             <appender-ref ref="FILE"/>
         </root>
     </springProfile>
     
+    <!-- ============================================================
+         特定包的日志级别配置
+         可以针对不同的包设置不同的日志级别
+         ============================================================ -->
+    
+    <!-- 应用代码日志级别: DEBUG
+         输出应用自身的详细调试信息 -->
     <logger name="com.example.mess" level="DEBUG"/>
+    
+    <!-- Spring Web日志级别: INFO
+         只输出Spring Web框架的重要信息 -->
     <logger name="org.springframework.web" level="INFO"/>
+    
+    <!-- Hibernate日志级别: WARN
+         只输出Hibernate的警告和错误信息
+         减少SQL相关的大量DEBUG日志 -->
     <logger name="org.hibernate" level="WARN"/>
 </configuration>
