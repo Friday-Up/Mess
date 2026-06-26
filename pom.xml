@@ -1,25 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- ============================================================
-     Mess 项目 Maven 构建配置文件 (pom.xml)
-     
-     定义项目的依赖管理、构建配置和插件设置。
-     基于Spring Boot 3.2.5父POM，继承默认配置。
-     
-     技术栈:
-     - Spring Boot 3.2.5 (Web + JPA + Security + Cache + Redis + Actuator)
-     - H2 内存数据库 (开发环境)
-     - SpringDoc OpenAPI (API文档)
-     - Lombok (代码简化)
-     
-     构建命令:
-     - 编译: mvn compile
-     - 打包: mvn clean package
-     - 运行: mvn spring-boot:run
-     - 测试: mvn test
-     
-     作者: zhangyaolong.5
-     创建时间: 2026-05-26
-     ============================================================ -->
+<!-- Mess项目Maven构建配置: Spring Boot 3.2.5, Web+JPA+Security+Cache+Redis+Actuator, H2, SpringDoc, Lombok -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
@@ -27,14 +7,7 @@
     <!-- Maven POM模型版本 -->
     <modelVersion>4.0.0</modelVersion>
 
-    <!-- -------------------------------------------------------
-         父POM: Spring Boot Starter Parent
-         继承Spring Boot的默认配置，包括:
-         - 依赖版本管理
-         - 插件配置
-         - 编译选项
-         - 资源过滤
-         ------------------------------------------------------- -->
+    <!-- 父POM: Spring Boot Starter Parent, 继承默认配置(依赖版本/插件/编译选项) -->
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
@@ -43,30 +16,20 @@
         <relativePath/>
     </parent>
 
-    <!-- -------------------------------------------------------
-         项目坐标: 唯一标识此项目
-         groupId: 组织标识（通常使用域名反写）
-         artifactId: 项目标识（项目名称）
-         version: 项目版本（SNAPSHOT表示开发版本）
-         ------------------------------------------------------- -->
+    <!-- 项目坐标: groupId=组织标识, artifactId=项目名称, version=版本(SNAPSHOT=开发版) -->
     <groupId>com.example</groupId>
     <artifactId>mess</artifactId>
     <version>0.0.1-SNAPSHOT</version>
     <name>mess</name>
     <description>A simple Spring Boot demo project</description>
 
-    <!-- -------------------------------------------------------
-         项目属性配置
-         ------------------------------------------------------- -->
+    <!-- 项目属性 -->
     <properties>
         <!-- Java版本: 需要JDK 17+（Spring Boot 3.x最低要求） -->
         <java.version>17</java.version>
     </properties>
 
-    <!-- -------------------------------------------------------
-         项目依赖
-         每个starter提供一组相关的自动配置和依赖
-         ------------------------------------------------------- -->
+    <!-- 项目依赖: 每个starter提供一组相关的自动配置和依赖 -->
     <dependencies>
         <!-- Spring Boot Web Starter
              提供Spring MVC、内嵌Tomcat、Jackson等
@@ -173,9 +136,7 @@
         
     </dependencies>
 
-    <!-- -------------------------------------------------------
-         构建配置
-         ------------------------------------------------------- -->
+    <!-- 构建配置 -->
     <build>
         <plugins>
             <!-- Spring Boot Maven Plugin
