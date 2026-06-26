@@ -1,134 +1,51 @@
-# ============================================================
-# Mess 生产环境配置文件
-# 
-# 当spring.profiles.active=prod时激活此配置文件。
-# 生产环境使用PostgreSQL数据库和Redis缓存，确保数据持久化和高性能。
-# 
-# 生产环境特点:
-# - 使用PostgreSQL数据库，数据持久化存储
-# - 使用Redis缓存，支持分布式缓存和高性能
-# - 关闭SQL日志打印，减少I/O开销
-# - 日志级别设为INFO，减少日志输出量
-# - 使用update策略，保留现有数据
-# 
-# 生产环境安全建议:
-# - 数据库密码使用环境变量注入，不要硬编码
-# - Redis密码使用环境变量注入
-# - 启用HTTPS，配置SSL证书
-# - 限制Actuator端点暴露范围
-# - 配置防火墙规则
-# 
-# 切换到生产环境的方式:
-# 1. 在application.yml中设置 spring.profiles.active=prod
-# 2. 启动参数: --spring.profiles.active=prod
-# 3. 环境变量: SPRING_PROFILES_ACTIVE=prod
-# 4. Docker Compose环境变量配置
-# 
-# 作者: zhangyaolong.5
-# 创建时间: 2026-05-26
-# ============================================================
-
-# -----------------------------------------------------------
-# 服务器配置
-# 生产环境使用默认端口8080
-# -----------------------------------------------------------
+# 生产环境配置 - PostgreSQL + Redis缓存 + INFO日志
+# 注意: 密码应使用环境变量注入，启用HTTPS，限制Actuator端点
 server:
   port: 8080
 
-# -----------------------------------------------------------
-# Spring框架配置（生产环境覆盖）
-# -----------------------------------------------------------
 spring:
-  # 应用名称
   application:
     name: mess
-
-  # -------------------------------------------------------
-  # 数据源配置 - PostgreSQL数据库
-  # 生产环境使用PostgreSQL，确保数据持久化和可靠性
-  # 连接地址中的postgres为Docker Compose中的服务名
-  # -------------------------------------------------------
+  # PostgreSQL数据库(postgres为Docker Compose中的服务名)
   datasource:
-    # PostgreSQL连接URL
-    # 格式: jdbc:postgresql://主机:端口/数据库名
-    # postgres: Docker Compose中PostgreSQL服务的主机名
     url: jdbc:postgresql://postgres:5432/mess
-    # 数据库用户名（生产环境应使用环境变量注入）
     username: postgres
-    # 数据库密码（生产环境应使用环境变量注入）
-    password: password
-    # PostgreSQL JDBC驱动类
+    password: password  # 生产环境应使用环境变量
     driver-class-name: org.postgresql.Driver
-
-  # -------------------------------------------------------
-  # JPA/Hibernate配置（生产环境）
-  # update: 只更新表结构，不删除现有数据
-  # show-sql: 关闭SQL打印，减少生产环境I/O开销
-  # -------------------------------------------------------
+  # JPA: update(保留数据) + 关闭SQL打印
   jpa:
-    # PostgreSQL方言，生成优化的SQL语句
     database-platform: org.hibernate.dialect.PostgreSQLDialect
     hibernate:
-      # update策略: 启动时更新表结构，保留现有数据
-      # 注意: 生产环境建议使用Flyway/Liquibase管理数据库迁移
-      ddl-auto: update
-    # 关闭SQL打印，减少日志量和性能开销
+      ddl-auto: update  # 生产建议用Flyway/Liquibase管理迁移
     show-sql: false
-
-  # -------------------------------------------------------
-  # 缓存配置 - Redis分布式缓存
-  # 生产环境使用Redis，支持分布式缓存和集群部署
-  # redis: Docker Compose中Redis服务的主机名
-  # -------------------------------------------------------
+  # Redis分布式缓存(redis为Docker Compose中的服务名)
   cache:
     type: redis
-
-  # -------------------------------------------------------
-  # Redis配置（生产环境）
-  # 连接Docker Compose中的Redis服务
-  # -------------------------------------------------------
   redis:
-    # Redis主机地址，指向Docker Compose中的redis服务
     host: redis
-    # Redis端口
     port: 6379
-    # 连接超时时间
     timeout: 2000ms
-    # Lettuce连接池配置
     lettuce:
       pool:
-        # 最大活跃连接数
         max-active: 8
-        # 最大空闲连接数
         max-idle: 8
-        # 最小空闲连接数
         min-idle: 0
 
-# -----------------------------------------------------------
-# Actuator监控配置（生产环境）
-# 暴露必要的端点，注意安全风险
-# -----------------------------------------------------------
+# Actuator: 生产环境应限制暴露端点
 management:
   endpoints:
     web:
       exposure:
-        # 生产环境应限制暴露的端点
         include: health,info,metrics,env,beans,configprops,loggers
   endpoint:
     health:
-      # 生产环境建议设为when-authorized，只对授权用户显示详情
-      show-details: always
+      show-details: always  # 生产建议设为when-authorized
   info:
     env:
       enabled: true
 
-# -----------------------------------------------------------
-# 日志配置（生产环境）
-# 设置为INFO级别，减少日志输出量，提高性能
-# -----------------------------------------------------------
+# 日志: INFO级别
 logging:
   level:
-    # 根日志级别: INFO，只输出重要信息
     root: INFO
-    # 应用包日志级别: INFO，只输出应用的重要信息
     com.example.mess: INFO
