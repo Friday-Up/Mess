@@ -24,7 +24,37 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 /**
- * UserController单元测试 - MockMvc + Mockito隔离测试
+ * UserController单元测试 - 使用MockMvc + Mockito隔离测试Controller层。
+ * 
+ * <p>测试策略:
+ * <ul>
+ *   <li>MockitoExtension: 自动初始化@Mock和@InjectMocks注解</li>
+ *   <li>Mock UserService: 隔离Service层依赖，只测试Controller逻辑</li>
+ *   <li>MockMvc: 模拟HTTP请求，验证请求映射、参数绑定、响应格式</li>
+ *   <li>覆盖所有端点: GET（列表+详情）、POST（创建）、PUT（更新）、DELETE（删除）</li>
+ * </ul>
+ * 
+ * <p>测试覆盖:
+ * <ul>
+ *   <li>getAllUsers: GET /api/users 验证分页列表返回</li>
+ *   <li>getUserById: GET /api/users/1 验证用户详情返回</li>
+ *   <li>getUserByIdWhenUserNotExist: GET /api/users/999 验证404处理</li>
+ *   <li>createUser: POST /api/users 验证用户创建</li>
+ *   <li>updateUser: PUT /api/users/1 验证用户更新</li>
+ *   <li>updateUserWhenUserNotExist: PUT /api/users/999 验证更新失败</li>
+ *   <li>deleteUser: DELETE /api/users/1 验证用户删除</li>
+ * </ul>
+ * 
+ * <p>Mockito使用说明:
+ * <ul>
+ *   <li>@Mock: 创建UserService的模拟对象</li>
+ *   <li>@InjectMocks: 将模拟对象注入到UserController</li>
+ *   <li>when().thenReturn(): 定义模拟行为</li>
+ *   <li>verify(): 验证方法调用次数和参数</li>
+ *   <li>verifyNoMoreInteractions(): 确保没有意外的额外调用</li>
+ * </ul>
+ * 
+ * @since 1.0
  */
 @ExtendWith(MockitoExtension.class)
 class UserControllerTest {

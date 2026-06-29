@@ -17,7 +17,33 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * HelloController测试 - @WebMvcTest只加载Web层，使用MockMvc模拟HTTP请求
+ * HelloController测试 - 使用@WebMvcTest只加载Web层，MockMvc模拟HTTP请求。
+ * 
+ * <p>测试策略:
+ * <ul>
+ *   <li>@WebMvcTest: 只加载HelloController和相关Spring MVC组件，不加载完整应用上下文</li>
+ *   <li>MockMvc: 模拟HTTP请求，不启动真实服务器，测试速度快</li>
+ *   <li>覆盖所有端点: 简单问候、高级问候、POST问候</li>
+ *   <li>验证响应格式: 检查ApiResponse结构和状态码</li>
+ * </ul>
+ * 
+ * <p>测试覆盖:
+ * <ul>
+ *   <li>helloWithDefaultName: GET /hello 默认参数</li>
+ *   <li>helloWithCustomName: GET /hello?name=Spring 自定义参数</li>
+ *   <li>advancedHelloWithVersionOne: GET /hello/advanced v1.0</li>
+ *   <li>advancedHelloWithVersionTwo: GET /hello/advanced v2.0</li>
+ *   <li>advancedHelloWithDefaultParameters: GET /hello/advanced 默认参数</li>
+ *   <li>helloPost: POST /hello 自定义参数</li>
+ * </ul>
+ * 
+ * <p>注意事项:
+ * <ul>
+ *   <li>需要配置安全测试上下文（当前使用@WebMvcTest，Security自动配置）</li>
+ *   <li>POST请求需要CSRF Token或禁用CSRF（SecurityConfig中已禁用）</li>
+ * </ul>
+ * 
+ * @since 1.0
  */
 @WebMvcTest(HelloController.class)
 @ActiveProfiles("test")
