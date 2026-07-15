@@ -71,42 +71,52 @@ public class UserDto {
      */
     private LocalDateTime createdAt;
 
+    /** 获取用户ID。 @return 用户唯一标识，新建用户序列化输入时可为null */
     public Long getId() {
         return id;
     }
 
+    /** 设置用户ID，创建请求中通常留空,由服务端在响应中回填。 @param id 用户唯一标识 */
     public void setId(Long id) {
         this.id = id;
     }
 
+    /** 获取用户名。 @return 登录用用户名 */
     public String getUsername() {
         return username;
     }
 
+    /** 设置用户名,须唯一且长度控制在1-50字符,创建/更新时为必填项。 @param username 用户名 */
     public void setUsername(String username) {
         this.username = username;
     }
 
+    /** 获取电子邮箱。 @return 邮箱地址 */
     public String getEmail() {
         return email;
     }
 
+    /** 设置电子邮箱,须唯一且符合邮箱格式,长度1-100字符。 @param email 邮箱地址 */
     public void setEmail(String email) {
         this.email = email;
     }
 
+    /** 获取用户真实姓名。 @return 姓名，可能为null */
     public String getName() {
         return name;
     }
 
+    /** 设置用户真实姓名,为可选展示字段,允许为空。 @param name 姓名 */
     public void setName(String name) {
         this.name = name;
     }
 
+    /** 获取创建时间。 @return 用户创建时间 */
     public LocalDateTime getCreatedAt() {
         return createdAt;
     }
 
+    /** 设置创建时间,该字段为只读,客户端传入的值会被服务端忽略。 @param createdAt 创建时间 */
     public void setCreatedAt(LocalDateTime createdAt) {
         this.createdAt = createdAt;
     }
