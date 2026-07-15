@@ -135,42 +135,52 @@ public class ApiResponse<T> {
         return response;
     }
 
+    /** 获取成功标识。 @return true表示请求成功，false表示失败 */
     public boolean isSuccess() {
         return success;
     }
 
+    /** 设置成功标识，一般由静态工厂方法内部设置，反序列化时也会调用。 @param success 成功标识 */
     public void setSuccess(boolean success) {
         this.success = success;
     }
 
+    /** 获取响应消息。 @return 提示文本 */
     public String getMessage() {
         return message;
     }
 
+    /** 设置响应消息，用于向前端传递提示或错误描述。 @param message 提示文本 */
     public void setMessage(String message) {
         this.message = message;
     }
 
+    /** 获取响应数据负载。 @return 泛型业务数据，失败时通常为null */
     public T getData() {
         return data;
     }
 
+    /** 设置响应数据负载。 @param data 泛型业务数据 */
     public void setData(T data) {
         this.data = data;
     }
 
+    /** 获取响应时间戳。 @return 响应生成时间 */
     public LocalDateTime getTimestamp() {
         return timestamp;
     }
 
+    /** 设置响应时间戳，默认在构造时自动生成，一般无需手动覆盖。 @param timestamp 响应时间 */
     public void setTimestamp(LocalDateTime timestamp) {
         this.timestamp = timestamp;
     }
 
+    /** 获取请求路径。 @return 请求路径，正常响应时通常为null */
     public String getPath() {
         return path;
     }
 
+    /** 设置请求路径，常用于异常处理时标记出错的接口，便于日志排查。 @param path 请求路径 */
     public void setPath(String path) {
         this.path = path;
     }
