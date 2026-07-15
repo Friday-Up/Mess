@@ -1,11 +1,38 @@
-# Docker Compose编排: mess-app + redis + postgres(可选)
-# 开发: docker-compose up -d redis
-# 完整: docker-compose up -d
-# 生产: docker-compose --profile prod up -d
+# ============================================================
+# Docker Compose编排配置 - Mess应用微服务架构
+# ============================================================
+# 使用场景:
+#   开发环境: docker-compose up -d redis        (只启动Redis缓存)
+#   完整环境: docker-compose up -d              (启动应用+Redis+PostgreSQL)
+#   生产模拟: docker-compose --profile prod up -d
+#
+# 服务依赖关系:
+#   mess-app → redis (缓存依赖)
+#   mess-app → postgres (数据库依赖，生产环境)
+#   服务间通过mess-network网络通信，使用服务名作为主机名
+#
+# 数据持久化:
+#   redis-data: Redis AOF持久化数据卷
+#   postgres-data: PostgreSQL数据卷
+#   容器重建后数据不丢失，除非手动删除卷
+#
+# 生产环境建议:
+#   - 密码使用Docker Secret或环境变量注入，不硬编码
+#   - 添加healthcheck健康检查
+#   - 配置restart: always保证服务自动重启
+#   - 使用自定义网络隔离不同环境
+# ============================================================
 version: '3.8'
 
 services:
-  # Spring Boot应用
+  # --------------------------------------------------------
+  # Spring Boot应用服务
+  # --------------------------------------------------------
+  # 构建上下文为当前目录(Dockerfile所在目录)
+  # 端口映射: 主机8080 → 容器8080
+  # 环境变量: 激活dev环境，Redis连接指向redis服务
+  # depends_on: 确保Redis先于应用启动
+  # --------------------------------------------------------
   mess-app:
     build: .
     ports:
@@ -19,7 +46,14 @@ services:
     networks:
       - mess-network
 
-  # Redis缓存 - Alpine精简镜像，开启AOF持久化
+  # --------------------------------------------------------
+  # Redis缓存服务
+  # --------------------------------------------------------
+  # 镜像: redis:7-alpine（精简版，约30MB）
+  # 端口: 6379（Redis默认端口）
+  # 持久化: appendonly yes 开启AOF，数据写入redis-data卷
+  # 生产建议: 添加密码认证 requirepass，配置maxmemory策略
+  # --------------------------------------------------------
   redis:
     image: redis:7-alpine
     ports:
@@ -30,7 +64,14 @@ services:
     networks:
       - mess-network
 
-  # PostgreSQL - 生产环境替代H2
+  # --------------------------------------------------------
+  # PostgreSQL数据库服务（生产环境替代H2）
+  # --------------------------------------------------------
+  # 镜像: postgres:15-alpine（精简版，约80MB）
+  # 数据库名: mess，用户: postgres
+  # 数据持久化到postgres-data卷
+  # 生产建议: 密码使用Docker Secret，不硬编码在yml中
+  # --------------------------------------------------------
   postgres:
     image: postgres:15-alpine
     ports:
@@ -44,12 +85,15 @@ services:
     networks:
       - mess-network
 
-# 数据卷 - 持久化容器数据
+# 数据卷 - 持久化容器数据，容器删除后数据保留
+# docker volume ls 查看卷列表
+# docker volume rm <volume_name> 删除卷（会丢失数据）
 volumes:
   redis-data:
   postgres-data:
 
 # 网络 - bridge驱动，服务间通过服务名通信
+# 如 mess-app 中访问Redis: redis:6379（服务名即主机名）
 networks:
   mess-network:
     driver: bridge

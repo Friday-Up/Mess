@@ -1,37 +1,91 @@
-# 生产环境配置 - PostgreSQL + Redis缓存 + INFO日志
-# 注意: 密码应使用环境变量注入，启用HTTPS，限制Actuator端点
+# ============================================================
+# 生产环境配置 (spring.profiles.active=prod)
+# ============================================================
+# 设计原则:
+#   - 使用PostgreSQL持久化数据库，数据不丢失
+#   - 使用Redis分布式缓存，支持多实例部署
+#   - 关闭SQL打印和DEBUG日志，减少性能开销和日志量
+#   - 安全加固: 密码环境变量注入、限制Actuator端点
+#
+# 安全注意事项:
+#   - 数据库密码应通过环境变量SPRING_DATASOURCE_PASSWORD注入
+#   - Redis密码应通过环境变量SPRING_REDIS_PASSWORD注入
+#   - 启用HTTPS，配置SSL证书
+#   - 限制Actuator端点暴露，health详情设为when-authorized
+#   - 配置CORS跨域策略，限制允许的来源域名
+#
+# 部署方式:
+#   - Docker Compose: SPRING_PROFILES_ACTIVE=prod
+#   - Kubernetes: ConfigMap + Secret管理配置和密码
+#   - 传统部署: java -jar app.jar --spring.profiles.active=prod
+# ============================================================
+
 server:
-  port: 8080
+  port: 8080  # 应用端口，生产环境建议在反向代理(nginx)后
 
 spring:
   application:
-    name: mess
-  # PostgreSQL数据库(postgres为Docker Compose中的服务名)
+    name: mess  # 应用名称，用于日志关联和监控标识
+
+  # --------------------------------------------------------
+  # PostgreSQL数据库配置
+  # --------------------------------------------------------
+  # 连接地址: postgres为Docker Compose中的服务名
+  # 驱动: org.postgresql.Driver（需引入postgresql依赖）
+  # 生产建议:
+  #   - 使用连接池(HikariCP，Spring Boot默认)优化数据库连接
+  #   - 配置连接池大小: maximumPoolSize, minimumIdle等
+  #   - 使用环境变量注入密码，不硬编码在配置文件中
+  # --------------------------------------------------------
   datasource:
-    url: jdbc:postgresql://postgres:5432/mess
+    url: jdbc:postgresql://postgres:5432/mess  # postgres为Docker服务名
     username: postgres
-    password: password  # 生产环境应使用环境变量
+    password: password  # 生产环境应使用环境变量: ${DB_PASSWORD}
     driver-class-name: org.postgresql.Driver
-  # JPA: update(保留数据) + 关闭SQL打印
+
+  # --------------------------------------------------------
+  # JPA/Hibernate配置
+  # --------------------------------------------------------
+  # ddl-auto=update: 启动时自动更新表结构，保留已有数据
+  #   注意: 生产环境不建议用update，可能导致数据丢失
+  #   推荐使用Flyway或Liquibase进行数据库版本迁移
+  # show-sql=false: 关闭SQL打印，避免日志泄露和性能开销
+  # --------------------------------------------------------
   jpa:
-    database-platform: org.hibernate.dialect.PostgreSQLDialect
+    database-platform: org.hibernate.dialect.PostgreSQLDialect  # PostgreSQL方言
     hibernate:
       ddl-auto: update  # 生产建议用Flyway/Liquibase管理迁移
-    show-sql: false
-  # Redis分布式缓存(redis为Docker Compose中的服务名)
-  cache:
-    type: redis
-  redis:
-    host: redis
-    port: 6379
-    timeout: 2000ms
-    lettuce:
-      pool:
-        max-active: 8
-        max-idle: 8
-        min-idle: 0
+    show-sql: false      # 关闭SQL打印，减少日志量和性能开销
 
-# Actuator: 生产环境应限制暴露端点
+  # --------------------------------------------------------
+  # Redis分布式缓存配置
+  # --------------------------------------------------------
+  # redis为Docker Compose中的服务名，服务间通过内部网络通信
+  # Lettuce客户端: 基于Netty的异步非阻塞Redis客户端
+  #   优势: 线程安全，单个连接支持并发操作
+  #   对比Jedis: Jedis是同步阻塞客户端，需连接池支持并发
+  # --------------------------------------------------------
+  cache:
+    type: redis  # 使用Redis分布式缓存，支持多实例共享
+  redis:
+    host: redis      # Docker Compose服务名，自动解析为容器IP
+    port: 6379       # Redis默认端口
+    timeout: 2000ms  # 连接超时2秒
+    lettuce:         # Lettuce客户端连接池
+      pool:
+        max-active: 8  # 最大活跃连接数（高并发可调大）
+        max-idle: 8    # 最大空闲连接数
+        min-idle: 0    # 最小空闲连接数
+
+# --------------------------------------------------------
+# Actuator监控端点配置（生产环境）
+# --------------------------------------------------------
+# 安全建议:
+#   - 减少暴露端点数量，只保留必要的health和info
+#   - health详情设为when-authorized，需认证后才显示
+#   - 配置独立管理端口: management.server.port=8081
+#   - 限制访问IP: 只允许内网监控系统访问
+# --------------------------------------------------------
 management:
   endpoints:
     web:
@@ -44,8 +98,14 @@ management:
     env:
       enabled: true
 
-# 日志: INFO级别
+# --------------------------------------------------------
+# 日志配置（生产环境）
+# --------------------------------------------------------
+# INFO级别: 只记录重要事件（启动、关闭、错误等）
+# 不打印SQL语句，减少日志量和I/O开销
+# 详细日志配置见logback-spring.xml（文件输出+滚动策略）
+# --------------------------------------------------------
 logging:
   level:
-    root: INFO
-    com.example.mess: INFO
+    root: INFO              # 全局INFO级别
+    com.example.mess: INFO  # 业务代码INFO级别

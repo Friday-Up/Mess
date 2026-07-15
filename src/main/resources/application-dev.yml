@@ -1,42 +1,97 @@
-# 开发环境配置 - H2内存数据库 + 简单缓存 + DEBUG日志
+# ============================================================
+# 开发环境配置 (spring.profiles.active=dev)
+# ============================================================
+# 设计原则:
+#   - 使用内存数据库(H2)，零配置启动，重启数据自动清理
+#   - 使用简单内存缓存，无需安装Redis
+#   - 开启DEBUG日志和SQL打印，方便开发调试
+#   - 开启H2控制台，可直接在浏览器查看数据库内容
+#
+# 与生产环境差异:
+#   - 数据库: H2内存(开发) vs PostgreSQL持久化(生产)
+#   - 缓存: simple内存(开发) vs Redis分布式(生产)
+#   - 日志: DEBUG打印SQL(开发) vs INFO关闭SQL(生产)
+#   - JPA: create-drop每次重建(开发) vs update保留数据(生产)
+# ============================================================
+
 server:
-  port: 8080
+  port: 8080  # 应用端口，开发环境默认8080
 
 spring:
   application:
-    name: mess
-  # H2内存数据库，重启后数据丢失
+    name: mess  # 应用名称，用于日志和监控标识
+
+  # --------------------------------------------------------
+  # H2内存数据库配置
+  # --------------------------------------------------------
+  # 特点: 数据存储在内存中，应用重启后数据丢失
+  # H2控制台: http://localhost:8080/h2-console
+  #   连接信息: JDBC URL=jdbc:h2:mem:testdb, User=sa, Password=password
+  # 用途: 开发和测试，无需安装外部数据库
+  # --------------------------------------------------------
   datasource:
-    url: jdbc:h2:mem:testdb
-    driver-class-name: org.h2.Driver
-    username: sa
-    password: password
-  # H2控制台: http://localhost:8080/h2-console (JDBC URL=jdbc:h2:mem:testdb)
+    url: jdbc:h2:mem:testdb          # 内存数据库URL，mem:表示内存模式
+    driver-class-name: org.h2.Driver  # H2 JDBC驱动
+    username: sa                       # 默认管理员账号
+    password: password                 # 默认密码（开发环境使用）
+
+  # H2控制台: 浏览器可视化管理数据库，仅开发环境启用
   h2:
     console:
-      enabled: true
-      path: /h2-console
-  # JPA: create-drop(启动建表/关闭删表) + 打印SQL
+      enabled: true          # 启用H2控制台
+      path: /h2-console      # 访问路径: http://localhost:8080/h2-console
+
+  # --------------------------------------------------------
+  # JPA/Hibernate配置
+  # --------------------------------------------------------
+  # ddl-auto选项说明:
+  #   create-drop: 启动时建表，关闭时删表（开发推荐）
+  #   create: 启动时先删表再建表
+  #   update: 启动时只更新表结构，不删数据
+  #   validate: 只验证表结构，不修改
+  #   none: 不做任何操作
+  # --------------------------------------------------------
   jpa:
-    database-platform: org.hibernate.dialect.H2Dialect
+    database-platform: org.hibernate.dialect.H2Dialect  # H2方言
     hibernate:
-      ddl-auto: create-drop
-    show-sql: true
-  # 简单内存缓存(无需Redis)
+      ddl-auto: create-drop  # 启动建表/关闭删表，确保每次启动数据干净
+    show-sql: true            # 打印SQL语句到控制台，方便调试
+
+  # --------------------------------------------------------
+  # 缓存配置
+  # --------------------------------------------------------
+  # simple: 基于ConcurrentHashMap的简单内存缓存
+  # 优点: 零配置，无需外部依赖
+  # 缺点: 单机缓存，不支持分布式，无TTL过期策略
+  # 生产环境切换为redis类型
+  # --------------------------------------------------------
   cache:
-    type: simple
-  # Redis(可选，未安装则使用simple缓存)
+    type: simple  # 使用简单内存缓存，无需安装Redis
+
+  # Redis配置（开发环境可选，未安装Redis时使用simple缓存）
   redis:
     host: localhost
     port: 6379
-    timeout: 2000ms
-    lettuce:
+    timeout: 2000ms  # 连接超时2秒
+    lettuce:         # Lettuce客户端连接池配置
       pool:
-        max-active: 8
-        max-idle: 8
-        min-idle: 0
+        max-active: 8  # 最大活跃连接数
+        max-idle: 8    # 最大空闲连接数
+        min-idle: 0    # 最小空闲连接数
 
-# Actuator: 暴露所有常用端点
+# --------------------------------------------------------
+# Actuator监控端点配置
+# --------------------------------------------------------
+# 暴露的端点:
+#   health: 健康检查（数据库连接、磁盘空间等）
+#   info: 应用信息（名称、版本等）
+#   metrics: 性能指标（HTTP请求统计、JVM内存等）
+#   env: 环境变量和配置属性
+#   beans: Spring Bean列表
+#   configprops: 配置属性列表
+#   loggers: 日志级别查看和修改
+# 访问示例: http://localhost:8080/actuator/health
+# --------------------------------------------------------
 management:
   endpoints:
     web:
@@ -44,13 +99,18 @@ management:
         include: health,info,metrics,env,beans,configprops,loggers
   endpoint:
     health:
-      show-details: always
+      show-details: always  # 开发环境始终显示健康详情
   info:
     env:
       enabled: true
 
-# 日志: DEBUG级别
+# --------------------------------------------------------
+# 日志配置
+# --------------------------------------------------------
+# DEBUG级别: 打印所有SQL语句和请求详情，方便开发调试
+# 生产环境应设为INFO，减少日志量
+# --------------------------------------------------------
 logging:
   level:
-    root: DEBUG
-    com.example.mess: DEBUG
+    root: DEBUG              # 全局DEBUG级别
+    com.example.mess: DEBUG  # 业务代码DEBUG级别

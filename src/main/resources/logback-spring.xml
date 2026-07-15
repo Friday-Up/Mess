@@ -1,9 +1,39 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Logback日志配置: dev=控制台DEBUG, prod=文件INFO+滚动 -->
+<!-- ============================================================
+     Logback日志配置 - Spring Boot集成日志框架
+     ============================================================
+     配置策略:
+       - dev环境: 控制台输出DEBUG级别日志，方便开发调试
+       - prod环境: 文件输出INFO级别日志，带滚动策略防止日志撑爆磁盘
+     
+     日志格式: %d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n
+       %d           - 时间戳（毫秒精度）
+       [%thread]    - 线程名（排查并发问题）
+       %-5level     - 日志级别左对齐5字符（DEBUG/INFO/WARN/ERROR）
+       %logger{36}  - Logger名缩写（最多36字符，如c.e.m.controller.HelloController）
+       %msg         - 日志消息
+       %n           - 换行
+     
+     Spring Profile机制:
+       <springProfile name="dev"> 只在spring.profiles.active=dev时生效
+       <springProfile name="prod"> 只在spring.profiles.active=prod时生效
+       不在任何一个profile中的配置对所有环境生效
+     
+     扩展建议:
+       - 添加SMTP appender实现错误邮件告警
+       - 添加异步appender（AsyncAppender）提升日志写入性能
+       - 生产环境添加JSON格式日志便于ELK采集
+     ============================================================ -->
 <configuration>
+    <!-- 引入Spring Boot默认日志配置（控制台输出模式、日志级别等基础配置） -->
     <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
 
-    <!-- 开发环境: 控制台输出 -->
+    <!-- ============================================================
+         开发环境配置: 控制台输出 + DEBUG级别
+         ============================================================
+         ConsoleAppender: 日志输出到标准输出（System.out）
+         适合开发调试，可实时查看应用运行状态
+         ============================================================ -->
     <springProfile name="dev">
         <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
             <encoder>
@@ -15,7 +45,17 @@
         </root>
     </springProfile>
 
-    <!-- 生产环境: 文件输出+滚动(10MB/文件, 30天, 1GB上限) -->
+    <!-- ============================================================
+         生产环境配置: 文件输出 + INFO级别 + 滚动策略
+         ============================================================
+         RollingFileAppender: 按时间和大小滚动，防止单个日志文件过大
+         滚动策略:
+           - maxFileSize: 单个文件最大10MB，超过后创建新文件
+           - maxHistory: 保留最近30天的日志文件
+           - totalSizeCap: 所有日志文件总大小上限1GB，超限删除最旧文件
+           - fileNamePattern: 归档文件名格式 app.2024-01-15.0.log
+         日志路径: logs/app.log（相对于应用启动目录）
+         ============================================================ -->
     <springProfile name="prod">
         <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
             <file>logs/app.log</file>
@@ -34,7 +74,14 @@
         </root>
     </springProfile>
 
-    <!-- 特定包日志级别 -->
+    <!-- ============================================================
+         特定包日志级别覆盖
+         ============================================================
+         优先级高于root level，用于精细控制第三方库日志输出:
+           - com.example.mess: DEBUG（开发时查看业务SQL和请求详情）
+           - org.springframework.web: INFO（只记录请求映射和关键事件）
+           - org.hibernate: WARN（隐藏SQL日志，只保留警告和错误）
+         ============================================================ -->
     <logger name="com.example.mess" level="DEBUG"/>
     <logger name="org.springframework.web" level="INFO"/>
     <logger name="org.hibernate" level="WARN"/>
