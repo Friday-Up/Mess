@@ -70,6 +70,12 @@ public class UserService {
      */
     @Cacheable(value = "users", key = "'allUsers-' + #pageable.pageNumber + '-' + #pageable.pageSize")
     public Page<UserDto> getAllUsers(Pageable pageable) {
+        // 调用Repository的分页查询，findAll(Pageable)由Spring Data JPA自动实现
+        // 底层会执行两条SQL：一条查询当前页数据（LIMIT/OFFSET），一条统计总记录数（COUNT）
+        // 返回的Page对象封装了当前页内容、总页数、总记录数等分页元信息
+        // 使用map(this::convertToDto)对Page中的每个User实体进行转换
+        // Page.map方法保留分页元信息不变，只转换内容元素类型 User → UserDto
+        // 方法引用this::convertToDto等价于 user -> convertToDto(user)
         return userRepository.findAll(pageable).map(this::convertToDto);
     }
 
@@ -84,8 +90,13 @@ public class UserService {
      */
     @Cacheable(value = "users", key = "#id")
     public UserDto getUserById(Long id) {
+        // 调用Repository的findById查询用户，返回Optional<User>包装可能不存在的结果
+        // orElseThrow：当Optional为空（用户不存在）时，抛出ResourceNotFoundException
+        // 使用Lambda表达式延迟创建异常对象，只有真正为空时才实例化异常，避免不必要开销
+        // 抛出的异常最终由GlobalExceptionHandler捕获并转换为404 HTTP响应
         User user = userRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("用户不存在"));
+        // 将查询到的JPA实体转换为DTO后返回，避免直接暴露实体内部结构
         return convertToDto(user);
     }
 
@@ -99,7 +110,12 @@ public class UserService {
      */
     @CacheEvict(value = "users", allEntries = true)
     public UserDto createUser(UserDto userDto) {
+        // convertToEntity：将传入的DTO转换为JPA实体（不含id和createdAt）
+        // userRepository.save：执行INSERT语句持久化实体，save会返回带有数据库生成id的实体
+        // 由于id为null，JPA判定为新增操作（若id非null则会执行UPDATE）
+        // 保存后数据库自增生成id，createdAt由数据库默认值CURRENT_TIMESTAMP填充
         User savedUser = userRepository.save(convertToEntity(userDto));
+        // 将保存后的实体（含自动生成的id和createdAt）转换为DTO返回给调用方
         return convertToDto(savedUser);
     }
 
@@ -115,11 +131,17 @@ public class UserService {
      */
     @CacheEvict(value = "users", key = "#id")
     public UserDto updateUser(Long id, UserDto userDto) {
+        // 先查询待更新的用户，确保其存在；不存在则抛出异常返回404
+        // 注意：这里查询出的existingUser处于JPA持久化上下文（persistence context）管理下
         User existingUser = userRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("用户不存在"));
+        // 逐个更新可修改字段（username、email、name），id和createdAt保持不变
+        // 只更新DTO中携带的业务字段，避免覆盖数据库管理的系统字段
         existingUser.setUsername(userDto.getUsername());
         existingUser.setEmail(userDto.getEmail());
         existingUser.setName(userDto.getName());
+        // save执行UPDATE语句（因为实体已有id），再将结果转换为DTO返回
+        // 由于实体处于持久化上下文中，即使不显式调用save，事务提交时也会自动flush
         return convertToDto(userRepository.save(existingUser));
     }
 
@@ -134,9 +156,14 @@ public class UserService {
      */
     @CacheEvict(value = "users", key = "#id")
     public void deleteUser(Long id) {
+        // 删除前先用existsById检查用户是否存在（只查COUNT，不加载实体，性能更优）
+        // 若直接调用deleteById删除不存在的记录，Spring Data会抛出异常，体验不友好
         if (!userRepository.existsById(id)) {
+            // 用户不存在时主动抛出业务异常，由GlobalExceptionHandler转换为404响应
             throw new ResourceNotFoundException("用户不存在");
         }
+        // 执行DELETE语句物理删除该用户记录，数据不可恢复
+        // 生产环境通常采用软删除（标记deleted字段）以保留数据用于审计和恢复
         userRepository.deleteById(id);
     }
 
@@ -149,11 +176,18 @@ public class UserService {
      * @return 用户DTO对象
      */
     private UserDto convertToDto(User user) {
+        // 创建空的DTO对象，逐字段从实体复制到DTO
         UserDto dto = new UserDto();
+        // 复制主键id，供前端标识和后续操作使用
         dto.setId(user.getId());
+        // 复制用户名（登录标识）
         dto.setUsername(user.getUsername());
+        // 复制邮箱地址
         dto.setEmail(user.getEmail());
+        // 复制真实姓名（可能为null）
         dto.setName(user.getName());
+        // 复制创建时间，供前端展示注册时间
+        // 注意：此处不复制密码等敏感字段（本实体虽无密码字段，但转换层是过滤敏感信息的关键位置）
         dto.setCreatedAt(user.getCreatedAt());
         return dto;
     }
@@ -167,10 +201,17 @@ public class UserService {
      * @return JPA实体对象（不含id和createdAt）
      */
     private User convertToEntity(UserDto dto) {
+        // 创建空的实体对象，只复制业务字段
         User user = new User();
+        // 复制用户名（须保证唯一，否则持久化时违反数据库唯一约束）
         user.setUsername(dto.getUsername());
+        // 复制邮箱（须保证唯一）
         user.setEmail(dto.getEmail());
+        // 复制真实姓名（可选字段）
         user.setName(dto.getName());
+        // 特意不复制id：新增时id应为null，由数据库自增生成
+        // 特意不复制createdAt：由数据库默认值CURRENT_TIMESTAMP自动填充
+        // 这样可防止客户端伪造id或篡改创建时间
         return user;
     }
 }

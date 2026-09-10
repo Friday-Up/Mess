@@ -100,9 +100,13 @@ public class ApiResponse<T> {
      * @return 包含业务数据的成功响应对象
      */
     public static <T> ApiResponse<T> success(T data) {
+        // 通过私有构造函数创建实例，构造时自动填充timestamp
         ApiResponse<T> response = new ApiResponse<>();
+        // 标记为成功
         response.success = true;
+        // 设置默认成功消息
         response.message = "Success";
+        // 填充业务数据负载
         response.data = data;
         return response;
     }
@@ -116,6 +120,7 @@ public class ApiResponse<T> {
      * @return 不包含业务数据的成功响应对象
      */
     public static <T> ApiResponse<T> success() {
+        // 复用success(T)方法并传入null，避免重复代码
         return success(null);
     }
 
@@ -129,59 +134,72 @@ public class ApiResponse<T> {
      * @return 包含错误信息的失败响应对象
      */
     public static <T> ApiResponse<T> error(String message) {
+        // 创建实例，构造时自动填充timestamp
         ApiResponse<T> response = new ApiResponse<>();
+        // 标记为失败
         response.success = false;
+        // 设置错误消息（data保持默认null，不返回业务数据）
         response.message = message;
         return response;
     }
 
     /** 获取成功标识。 @return true表示请求成功，false表示失败 */
     public boolean isSuccess() {
+        // 返回成功标识，前端据此判断如何处理响应
         return success;
     }
 
     /** 设置成功标识，一般由静态工厂方法内部设置，反序列化时也会调用。 @param success 成功标识 */
     public void setSuccess(boolean success) {
+        // 赋值成功标识
         this.success = success;
     }
 
     /** 获取响应消息。 @return 提示文本 */
     public String getMessage() {
+        // 返回提示消息文本
         return message;
     }
 
     /** 设置响应消息，用于向前端传递提示或错误描述。 @param message 提示文本 */
     public void setMessage(String message) {
+        // 赋值提示消息
         this.message = message;
     }
 
     /** 获取响应数据负载。 @return 泛型业务数据，失败时通常为null */
     public T getData() {
+        // 返回泛型业务数据
         return data;
     }
 
     /** 设置响应数据负载。 @param data 泛型业务数据 */
     public void setData(T data) {
+        // 赋值泛型业务数据
         this.data = data;
     }
 
     /** 获取响应时间戳。 @return 响应生成时间 */
     public LocalDateTime getTimestamp() {
+        // 返回响应生成时间戳
         return timestamp;
     }
 
     /** 设置响应时间戳，默认在构造时自动生成，一般无需手动覆盖。 @param timestamp 响应时间 */
     public void setTimestamp(LocalDateTime timestamp) {
+        // 赋值时间戳（构造时已自动生成，通常无需覆盖）
         this.timestamp = timestamp;
     }
 
     /** 获取请求路径。 @return 请求路径，正常响应时通常为null */
     public String getPath() {
+        // 返回请求路径（异常时用于定位出错接口）
         return path;
     }
 
     /** 设置请求路径，常用于异常处理时标记出错的接口，便于日志排查。 @param path 请求路径 */
     public void setPath(String path) {
+        // 赋值请求路径
         this.path = path;
     }
 }

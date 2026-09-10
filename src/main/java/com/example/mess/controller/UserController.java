@@ -78,6 +78,8 @@ public class UserController {
     @GetMapping
     @Operation(summary = "获取用户列表", description = "获取所有用户的分页列表")
     public ApiResponse<Page<UserDto>> getAllUsers(Pageable pageable) {
+        // 调用Service层获取分页用户数据，Pageable由Spring从请求参数(page/size/sort)自动构建
+        // 使用ApiResponse.success包装结果，统一返回格式便于前端解析
         return ApiResponse.success(userService.getAllUsers(pageable));
     }
 
@@ -94,6 +96,8 @@ public class UserController {
     @GetMapping("/{id}")
     @Operation(summary = "获取用户详情", description = "根据用户ID获取用户详细信息")
     public ApiResponse<UserDto> getUserById(@PathVariable Long id) {
+        // @PathVariable从URL路径(/api/users/{id})中提取id
+        // 委托Service查询用户详情，若不存在Service会抛出异常由全局处理器返回404
         return ApiResponse.success(userService.getUserById(id));
     }
 
@@ -117,6 +121,8 @@ public class UserController {
     @PostMapping
     @Operation(summary = "创建用户", description = "创建新的用户")
     public ApiResponse<UserDto> createUser(@RequestBody UserDto userDto) {
+        // @RequestBody将请求体JSON反序列化为UserDto对象
+        // 委托Service完成持久化，返回包含自动生成id和createdAt的用户信息
         return ApiResponse.success(userService.createUser(userDto));
     }
 
@@ -141,6 +147,8 @@ public class UserController {
     @PutMapping("/{id}")
     @Operation(summary = "更新用户", description = "根据用户ID更新用户信息")
     public ApiResponse<UserDto> updateUser(@PathVariable Long id, @RequestBody UserDto userDto) {
+        // 同时接收路径变量id（定位待更新用户）和请求体userDto（新的字段值）
+        // 委托Service执行全量更新，返回更新后的用户信息
         return ApiResponse.success(userService.updateUser(id, userDto));
     }
 
@@ -157,7 +165,9 @@ public class UserController {
     @DeleteMapping("/{id}")
     @Operation(summary = "删除用户", description = "根据用户ID删除用户")
     public ApiResponse<Void> deleteUser(@PathVariable Long id) {
+        // 委托Service删除指定用户，无返回数据
         userService.deleteUser(id);
+        // 删除成功返回不含数据的成功响应（data为null），符合REST删除操作语义
         return ApiResponse.success(null);
     }
 }

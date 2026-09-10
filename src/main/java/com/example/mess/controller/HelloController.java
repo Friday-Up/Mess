@@ -64,8 +64,11 @@ public class HelloController {
     @GetMapping
     @Operation(summary = "简单问候", description = "根据名称返回问候语，name参数可选，默认为'World'")
     public ApiResponse<String> hello(@RequestParam(defaultValue = "World") String name) {
+        // 使用String.format拼装问候语，name未传时默认为"World"
         String greeting = String.format("Hello, %s!", name);
+        // 记录INFO级日志，便于追踪接口调用情况（占位符{}避免字符串拼接开销）
         log.info("收到问候请求，问候对象: {}", name);
+        // 用统一响应对象包装问候语返回
         return ApiResponse.success(greeting);
     }
 
@@ -92,10 +95,14 @@ public class HelloController {
             @RequestParam(defaultValue = "1.0") String version) {
         String greeting;
         if ("2.0".equals(version)) {
+            // 版本2.0返回增强格式问候语（含Welcome欢迎信息）
+            // 用常量"2.0"在前调用equals，可避免version为null时的空指针异常
             greeting = String.format("Hello, %s! Welcome to API v%s", name, version);
         } else {
+            // 其他版本返回标准格式问候语（附带版本号标识）
             greeting = String.format("Hello, %s! (API v%s)", name, version);
         }
+        // 记录问候对象与版本号，便于统计各版本调用分布
         log.info("收到高级问候请求，问候对象: {}, 版本: {}", name, version);
         return ApiResponse.success(greeting);
     }
@@ -113,7 +120,9 @@ public class HelloController {
     @PostMapping
     @Operation(summary = "POST问候", description = "通过POST请求发送问候")
     public ApiResponse<String> helloPost(@RequestParam(defaultValue = "World") String name) {
+        // POST方式的问候语，附加"(via POST)"以区别于GET请求
         String greeting = String.format("Hello, %s! (via POST)", name);
+        // 记录POST问候日志
         log.info("收到POST问候请求，问候对象: {}", name);
         return ApiResponse.success(greeting);
     }

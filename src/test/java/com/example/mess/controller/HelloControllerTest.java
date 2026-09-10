@@ -58,15 +58,18 @@ class HelloControllerTest {
     /** GET /hello 默认参数 → "Hello, World!" */
     @Test
     void helloWithDefaultName() throws Exception {
+        // Act: 不带 name 参数发起 GET，触发 Controller 的默认值逻辑
         MvcResult result = mockMvc.perform(get("/hello")
                 .contentType(MediaType.APPLICATION_JSON))
-                .andExpect(status().isOk())
-                .andReturn();
+                .andExpect(status().isOk())                       // 先断言 HTTP 200
+                .andReturn();                                     // 取出完整响应以便反序列化
 
+        // 借助 TypeFactory 构造 ApiResponse<String> 的泛型类型，避免泛型擦除导致反序列化失败
         ApiResponse<String> response = objectMapper.readValue(
                 result.getResponse().getContentAsString(),
                 objectMapper.getTypeFactory().constructParametricType(ApiResponse.class, String.class));
 
+        // Assert: 业务成功标志为 true，且默认问候语为 "Hello, World!"
         assertTrue(response.isSuccess());
         assertEquals("Hello, World!", response.getData());
     }
@@ -74,16 +77,19 @@ class HelloControllerTest {
     /** GET /hello?name=Spring → "Hello, Spring!" */
     @Test
     void helloWithCustomName() throws Exception {
+        // Act: 带 name=Spring 参数发起 GET，验证参数绑定生效
         MvcResult result = mockMvc.perform(get("/hello")
                 .param("name", "Spring")
                 .contentType(MediaType.APPLICATION_JSON))
                 .andExpect(status().isOk())
                 .andReturn();
 
+        // 反序列化响应体为 ApiResponse<String>
         ApiResponse<String> response = objectMapper.readValue(
                 result.getResponse().getContentAsString(),
                 objectMapper.getTypeFactory().constructParametricType(ApiResponse.class, String.class));
 
+        // Assert: 问候语应含传入的名字
         assertTrue(response.isSuccess());
         assertEquals("Hello, Spring!", response.getData());
     }
@@ -91,6 +97,7 @@ class HelloControllerTest {
     /** GET /hello/advanced?name=Spring&version=1.0 → "Hello, Spring! (API v1.0)" */
     @Test
     void advancedHelloWithVersionOne() throws Exception {
+        // Act: 传入 version=1.0，验证 Controller 对 1.0 分支的格式化输出
         MvcResult result = mockMvc.perform(get("/hello/advanced")
                 .param("name", "Spring")
                 .param("version", "1.0")
@@ -98,10 +105,12 @@ class HelloControllerTest {
                 .andExpect(status().isOk())
                 .andReturn();
 
+        // 反序列化响应体为 ApiResponse<String>
         ApiResponse<String> response = objectMapper.readValue(
                 result.getResponse().getContentAsString(),
                 objectMapper.getTypeFactory().constructParametricType(ApiResponse.class, String.class));
 
+        // Assert: v1.0 分支应返回带 "(API v1.0)" 后缀的问候语
         assertTrue(response.isSuccess());
         assertEquals("Hello, Spring! (API v1.0)", response.getData());
     }
@@ -109,6 +118,7 @@ class HelloControllerTest {
     /** GET /hello/advanced?name=Spring&version=2.0 → "Hello, Spring! Welcome to API v2.0" */
     @Test
     void advancedHelloWithVersionTwo() throws Exception {
+        // Act: 传入 version=2.0，验证 Controller 对 2.0 分支的差异化文案
         MvcResult result = mockMvc.perform(get("/hello/advanced")
                 .param("name", "Spring")
                 .param("version", "2.0")
@@ -116,10 +126,12 @@ class HelloControllerTest {
                 .andExpect(status().isOk())
                 .andReturn();
 
+        // 反序列化响应体为 ApiResponse<String>
         ApiResponse<String> response = objectMapper.readValue(
                 result.getResponse().getContentAsString(),
                 objectMapper.getTypeFactory().constructParametricType(ApiResponse.class, String.class));
 
+        // Assert: v2.0 分支应返回 "Welcome to API v2.0" 文案
         assertTrue(response.isSuccess());
         assertEquals("Hello, Spring! Welcome to API v2.0", response.getData());
     }
@@ -127,15 +139,18 @@ class HelloControllerTest {
     /** GET /hello/advanced 默认参数 → "Hello, World! (API v1.0)" */
     @Test
     void advancedHelloWithDefaultParameters() throws Exception {
+        // Act: 不传任何参数，验证 name 与 version 的默认值同时生效
         MvcResult result = mockMvc.perform(get("/hello/advanced")
                 .contentType(MediaType.APPLICATION_JSON))
                 .andExpect(status().isOk())
                 .andReturn();
 
+        // 反序列化响应体为 ApiResponse<String>
         ApiResponse<String> response = objectMapper.readValue(
                 result.getResponse().getContentAsString(),
                 objectMapper.getTypeFactory().constructParametricType(ApiResponse.class, String.class));
 
+        // Assert: 默认 name=World、version=1.0 组合的问候语
         assertTrue(response.isSuccess());
         assertEquals("Hello, World! (API v1.0)", response.getData());
     }
@@ -143,16 +158,19 @@ class HelloControllerTest {
     /** POST /hello?name=SpringBoot → "Hello, SpringBoot! (via POST)" */
     @Test
     void helloPost() throws Exception {
+        // Act: 用 POST 方法访问 /hello，验证 POST 端点及 CSRF 已在 SecurityConfig 中禁用
         MvcResult result = mockMvc.perform(post("/hello")
                 .param("name", "SpringBoot")
                 .contentType(MediaType.APPLICATION_JSON))
                 .andExpect(status().isOk())
                 .andReturn();
 
+        // 反序列化响应体为 ApiResponse<String>
         ApiResponse<String> response = objectMapper.readValue(
                 result.getResponse().getContentAsString(),
                 objectMapper.getTypeFactory().constructParametricType(ApiResponse.class, String.class));
 
+        // Assert: POST 端点应返回带 "(via POST)" 标识的问候语
         assertTrue(response.isSuccess());
         assertEquals("Hello, SpringBoot! (via POST)", response.getData());
     }

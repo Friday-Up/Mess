@@ -88,51 +88,61 @@ public class User {
 
     /** 获取用户主键ID。 @return 用户ID，新建用户保存前为null */
     public Long getId() {
+        // 返回主键id；新建实体尚未持久化时为null
         return id;
     }
 
     /** 设置用户主键ID，通常由JPA在持久化后自动回填，业务代码一般无需调用。 @param id 用户ID */
     public void setId(Long id) {
+        // 赋值主键id，一般由JPA框架在save后回填，业务代码谨慎手动调用
         this.id = id;
     }
 
     /** 获取用户名（登录标识）。 @return 用户名 */
     public String getUsername() {
+        // 返回用户名（登录唯一标识）
         return username;
     }
 
-    /** 设置用户名，须保证全局唯一，否则持久化时会违反唯一约束。 @param username 用户名 */
+    /** 设置用户名，须保证全局唯一，否则持久化时会违反唯一约束。 @param username用户名 */
     public void setUsername(String username) {
+        // 赋值用户名，须确保全局唯一
         this.username = username;
     }
 
     /** 获取电子邮箱。 @return 邮箱地址 */
     public String getEmail() {
+        // 返回邮箱地址
         return email;
     }
 
     /** 设置电子邮箱，须保证全局唯一，建议在设置前做格式校验。 @param email 邮箱地址 */
     public void setEmail(String email) {
+        // 赋值邮箱，须确保全局唯一并建议先做格式校验
         this.email = email;
     }
 
     /** 获取用户真实姓名。 @return 姓名，可能为null */
     public String getName() {
+        // 返回真实姓名（可选字段，可能为null）
         return name;
     }
 
     /** 设置用户真实姓名，为可选字段，允许为空。 @param name 姓名 */
     public void setName(String name) {
+        // 赋值真实姓名（可选，允许为空）
         this.name = name;
     }
 
     /** 获取创建时间。 @return 用户创建时间，由数据库自动生成 */
     public LocalDateTime getCreatedAt() {
+        // 返回创建时间（由数据库默认值填充）
         return createdAt;
     }
 
     /** 设置创建时间，正常由数据库默认值填充，手动设置仅用于数据迁移等特殊场景。 @param createdAt 创建时间 */
     public void setCreatedAt(LocalDateTime createdAt) {
+        // 赋值创建时间，一般无需手动调用，仅用于数据迁移等特殊场景
         this.createdAt = createdAt;
     }
 }

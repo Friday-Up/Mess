@@ -53,8 +53,11 @@ public class GlobalExceptionHandler {
      */
     @ExceptionHandler(ResourceNotFoundException.class)
     public ResponseEntity<ApiResponse<Void>> handleResourceNotFoundException(ResourceNotFoundException ex) {
+        // 记录ERROR级日志（资源未找到属于可预期的业务异常，无需打印堆栈）
         log.error("资源未找到: {}", ex.getMessage());
+        // 用异常消息构建错误响应，便于前端展示具体的未找到原因
         ApiResponse<Void> response = ApiResponse.error(ex.getMessage());
+        // 返回HTTP 404状态码及错误响应体
         return ResponseEntity.status(HttpStatus.NOT_FOUND).body(response);
     }
 
@@ -69,8 +72,11 @@ public class GlobalExceptionHandler {
      */
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiResponse<Void>> handleGenericException(Exception ex) {
+        // 记录完整异常堆栈（第三个参数ex），便于开发人员定位未预期的系统错误
         log.error("系统异常: {}", ex.getMessage(), ex);
+        // 对外只返回笼统的"系统内部错误"，不暴露堆栈细节，防止敏感信息泄露
         ApiResponse<Void> response = ApiResponse.error("系统内部错误");
+        // 返回HTTP 500状态码及错误响应体
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(response);
     }
 }

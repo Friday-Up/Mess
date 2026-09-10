@@ -80,18 +80,26 @@ public class SecurityConfig {
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         http
+            // 配置授权规则：定义哪些请求需要认证，哪些可匿名访问
             .authorizeHttpRequests(auth -> auth
+                // /hello/** 路径全部放行（问候API，用于演示和健康检查）
                 .requestMatchers("/hello/**").permitAll()
+                // Swagger文档相关路径放行，方便开发调试查看API文档
                 .requestMatchers("/swagger-ui/**", "/v3/api-docs/**").permitAll()
+                // 除上述放行路径外，其余所有请求都必须通过认证
                 .anyRequest().authenticated()
             )
+            // 启用表单登录，指定自定义登录页路径为/login，并放行登录页本身
             .formLogin(form -> form
                 .loginPage("/login")
                 .permitAll()
             )
+            // 启用登出功能，放行登出请求（默认/logout）
             .logout(logout -> logout.permitAll())
+            // 禁用CSRF保护：REST API为无状态请求，通常使用Token认证而非Cookie会话
             .csrf(csrf -> csrf.disable());
         
+        // 构建并返回配置完成的安全过滤器链
         return http.build();
     }
 
@@ -113,18 +121,23 @@ public class SecurityConfig {
      */
     @Bean
     public InMemoryUserDetailsManager userDetailsService() {
+        // 构建普通用户：用户名user，密码password，角色USER
+        // withDefaultPasswordEncoder使用明文密码（内部标记为{noop}），仅限演示使用
         UserDetails user = User.withDefaultPasswordEncoder()
             .username("user")
             .password("password")
             .roles("USER")
             .build();
         
+        // 构建管理员用户：用户名admin，密码admin，角色ADMIN
+        // 生产环境必须改用BCryptPasswordEncoder对密码加密存储
         UserDetails admin = User.withDefaultPasswordEncoder()
             .username("admin")
             .password("admin")
             .roles("ADMIN")
             .build();
         
+        // 将两个用户放入内存管理器；数据仅存于内存，应用重启后丢失
         return new InMemoryUserDetailsManager(user, admin);
     }
 }
