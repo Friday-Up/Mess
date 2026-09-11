@@ -177,47 +177,34 @@ class HelloControllerTest {
 
     /*
      * ============================================================================
-     * 【测试设计文档】HelloControllerTest 端点测试策略说明（补充文档，非可执行代码）
+     * 【阅读笔记】序列化与反序列化测试技巧（非可执行代码）
      * ============================================================================
      *
-     * 一、测试目标
+     * 一、单元测试 vs 集成测试的取舍
      * ----------------------------------------------------------------------------
-     * 验证 HelloController 各演示端点的路由、参数绑定与统一响应封装是否正确，
-     * 同时示范"如何对包裹在 ApiResponse<T> 中的响应做反序列化与断言"。
+     *   本类只做 Controller 层的表现验证，不涉及真实序列化，
+     *   保证"请求路由+参数绑定+响应结构"正确即可。
+     *   验证 JSON 结构要用 @JsonTest 或在测试中通过 ObjectMapper 序列化。
      *
-     * 二、ApiResponse 泛型反序列化要点（本类核心知识点）
+     * 二、范型返回值的常见坑
      * ----------------------------------------------------------------------------
-     * 由于 Java 泛型擦除，直接 readValue(json, ApiResponse.class) 会把 data 读成
-     * LinkedHashMap 而非目标类型。正确做法是显式构造带参类型：
-     *   JavaType type = objectMapper.getTypeFactory()
-     *       .constructParametricType(ApiResponse.class, String.class);
-     *   ApiResponse<String> resp = objectMapper.readValue(json, type);
-     * 这样才能让 data 被正确反序列化为 String。
+     *   若直接在 RestTemplate/WebClient 层拿 ApiResponse<T>，会遭遇泛型擦除——
+     *   T 被还原成 LinkedHashMap，字段访问会 出现 ClassCastException。
+     *   解决方案：
+     *     - 用 ParameterizedTypeReference / TypeFactory 指定泛型类型;
+     *     - 或者封装一个辅助方法 decode(ApiResponse.class, UserDto.class)。
      *
-     * 三、用例覆盖矩阵
+     * 三、ObjectMapper 在测试中的最佳实践
      * ----------------------------------------------------------------------------
-     *   GET  /hello          —— 返回固定问候语，校验 success 与 data;
-     *   GET  /hello/{name}   —— 路径变量问候，校验 name 是否正确回显;
-     *   POST /hello          —— 参数/请求体问候，校验 "(via POST)" 后缀;
-     *   以及对应的响应结构（code/message/data）断言。
+     *   - 共享同一个 ObjectMapper 实例，而不是每个测试新建（昂贵）;
+     *   - 使用 @JsonTest 的 JacksonTester<UserDto> 可以快速序列化/反序列化;
+     *   - 业务上有自定义 Module 时，测试中要用同一套配置，避免"造假"通过。
      *
-     * 四、关键测试决策
+     * 四、字符集与时间格式
      * ----------------------------------------------------------------------------
-     * 决策 1：显式用 TypeFactory 处理泛型
-     *   理由：这是消费 ApiResponse<T> 的通用正确姿势，避免泛型擦除坑，
-     *        对后续所有接口的响应断言都有示范意义。
-     * 决策 2：断言 isSuccess() 而非只断言 data
-     *   理由：既校验业务成功标志，又校验负载内容，双重保障响应正确性。
-     *
-     * 五、注意事项
-     * ----------------------------------------------------------------------------
-     *   ! 若 ApiResponse 的 success 判定逻辑变化，isSuccess() 断言需同步复核;
-     *   ! POST 端点在启用安全时同样需注意 CSRF/放行问题;
-     *   ! 中文/特殊字符问候需确认字符编码为 UTF-8，避免断言因编码不一致失败。
-     *
-     * 六、如何运行
-     * ----------------------------------------------------------------------------
-     *   仅本类：   mvn -Dtest=HelloControllerTest test
+     *   - 时间字段：在测试预期中明确时区（GMT+8）与格式，防止 CI 环境默认值不同;
+     *   - 中文/特殊字符：利用 UTF-8 编码，在请求与响应 Content-Type 中声明;
+     *   - 数字与布尔：JSON 中 1/0 不等于 true/false，在序列化断言时要写明类型。
      * ============================================================================
      */
 }

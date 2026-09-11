@@ -91,87 +91,69 @@ public interface UserRepository extends JpaRepository<User, Long> {
 
 /*
  * ============================================================================
- * 【设计文档】UserRepository 数据访问层设计说明（补充文档，非可执行代码）
+ * 【阅读笔记】Spring Data JPA 继承体系与自定义查询（非可执行代码）
  * ============================================================================
  *
- * 一、Spring Data JPA 的"接口即实现"范式
+ * 一、常用继承接口对比
  * ----------------------------------------------------------------------------
- * 本接口无需编写任何实现类：Spring Data JPA 在启动时为其生成动态代理，
- * 代理会根据方法名（派生查询）或 @Query 注解自动生成并执行 SQL。
- * 这一范式将开发者从大量样板 DAO 代码中解放出来。
+ *   Repository                —— 标记接口，只提供元信息;
+ *   CrudRepository            —— 基础 CRUD：save/findById/findAll/delete 等;
+ *   PagingAndSortingRepository —— 增加分页和排序;
+ *   JpaRepository             —— 再增批量删除、flush、示例匹配等 JPA 特有方法。
+ *   日常直接继承 JpaRepository 即可，没必要叠加多级接口。
  *
- * 二、方法命名派生查询规则
+ * 二、三种查询方式的选择
  * ----------------------------------------------------------------------------
- *   findByUsername      → WHERE username = ?
- *   findByEmail         → WHERE email = ?
- *   existsByUsername    → SELECT COUNT/EXISTS ... WHERE username = ?
- *   existsByEmail       → SELECT COUNT/EXISTS ... WHERE email = ?
- * 命名关键字（findBy/existsBy/countBy/deleteBy + And/Or/Between/Like 等）
- * 由框架解析为对应的查询语义，务必保持字段名与实体属性名一致。
+ *   1) 派生方法名（默认）—— 看名字生成 SQL，适合 80% 简单场景;
+ *   2) @Query JPQL / HQL —— 语义清晰,可复用,适合多条件/关联查询;
+ *   3) @Query(nativeQuery = true) —— 原生 SQL,仅当 JPQL 表达不必要时。
+ *   建议按复杂度迭代：先试方法名，不够再写 JPQL，最后才落到原生 SQL。
  *
- * 三、返回类型语义
+ * 三、常见注解用法速查
  * ----------------------------------------------------------------------------
- *   Optional<User> —— 表达"可能不存在"，强制调用方显式处理空值，避免 NPE;
- *   boolean        —— 存在性判断，仅查 COUNT/EXISTS，不加载实体，性能更优。
+ *   @Param("name")           —— 绑定 JPQL 中的 :name 参数;
+ *   @Modifying               —— 标识 UPDATE/DELETE，需配合 @Transactional;
+ *   @Transactional(readOnly) —— 只读查询让底层做优化;
+ *   EntityGraph / JOIN FETCH —— 一次性加载关联，规避 N+1;
+ *   Pageable + Page<T>       —— 分页参数透传，返回带总数与元信息。
  *
- * 四、关键设计决策
+ * 四、常见误区
  * ----------------------------------------------------------------------------
- * 决策 1：唯一性校验用 existsByXxx 而非 findByXxx
- *   理由：existsBy 只需数据库返回是否存在，无需回传整行数据，开销更小。
- * 决策 2：查询返回 Optional 而非可能为 null 的 User
- *   理由：Optional 在类型层面表达"缺失"语义，配合业务层可优雅转 404。
- * 决策 3：继承 JpaRepository 而非 CrudRepository
- *   理由：JpaRepository 额外提供分页、排序、批量、flush 等能力，更契合本项目。
- *
- * 五、性能与索引建议
- * ----------------------------------------------------------------------------
- *   - username/email 已通过 @Column(unique=true) 建立唯一索引，等值查询高效;
- *   - 列表查询务必分页（Pageable），避免全表扫描导致内存与延迟问题;
- *   - 高频复杂查询可考虑 @Query 手写 JPQL/原生 SQL 并配合执行计划优化。
- *
- * 六、与相关组件的关系
- * ----------------------------------------------------------------------------
- *   - 上游：UserService 注入并调用本接口完成持久化;
- *   - 关联实体：User（<User, Long> 中的类型参数分别是实体与主键类型）;
- *   - 事务：读写事务边界由 UserService 的 @Transactional 统一管理。
- *
- * 七、扩展指南
- * ----------------------------------------------------------------------------
- *   - 复杂动态查询：引入 JpaSpecificationExecutor 使用 Specification 组合条件;
- *   - 只取部分字段：定义投影接口（Projection）或 DTO 构造表达式查询;
- *   - 批量操作：使用 @Modifying + @Query 或 saveAll，注意清理持久化上下文。
+ *   - existsBy 只判断存在，返回布尔，比先 findBy 再判 null 更轻;
+ *   - deleteBy 派生方法会先查后删,大批量删除建议原生 SQL 或批量 API;
+ *   - 派生方法名太长时会生成超复杂动态 SQL，此时应直接写 JPQL。
  * ============================================================================
  */
 
 /*
  * ============================================================================
- * 【补充文档】UserRepository 查询命名与性能 FAQ（非可执行代码）
+ * 【补充阅读】分页与排序实战（非可执行代码）
  * ============================================================================
  *
- * 一、派生查询命名速查
+ * 一、基本用法
  * ----------------------------------------------------------------------------
- *   findByUsername(String)        -> WHERE username = ?
- *   existsByEmail(String)         -> SELECT COUNT>0，仅判断存在性，性能优于查实体
- *   countByStatus(int)            -> SELECT COUNT(*) WHERE status = ?
- *   findByUsernameAndEmail(..)    -> AND 组合条件
- *   findByUsernameOrderByIdDesc() -> 带排序
+ *   Page<User> page = userRepository.findAll(PageRequest.of(0, 20, sort));
+ *   返回的 Page<T> 携带：内容列表、总条数、总页数、当前页等信息，
+ *   直接作为 data 内嵌结构返回前端即可。
  *
- * 二、返回类型语义
+ * 二、排序的正确姿势
  * ----------------------------------------------------------------------------
- *   Optional<T> ：可能不存在，调用方显式处理空，避免 NPE;
- *   List<T>     ：多结果集合，无匹配返回空列表而非 null;
- *   boolean     ：存在性判断，配合 existsBy 前缀最高效;
- *   long        ：计数，配合 countBy 前缀。
+ *   Sort sort = Sort.by(Sort.Direction.DESC, "createdAt");
+ *   多字段：Sort.by("status").ascending().and(Sort.by("id").descending());
+ *   注意：不要把前端传入的字段名直接拼进 SQL——会产生注入风险;
+ *   派生查询走参数绑定天然安全，自定义原生 SQL 时排序字段必须白名单校验。
  *
- * 三、性能 FAQ
+ * 三、深分页的性能陷阱
  * ----------------------------------------------------------------------------
- *   Q: 判断"是否存在"该用 findBy 还是 existsBy？
- *   A: 用 existsBy，底层只做 COUNT/EXISTS，不加载实体，开销更小。
+ *   LIMIT 100000, 20 会让数据库先扫描前 100020 行再丢弃，成本随页码线性上升。
+ *   常见优化：
+ *     1) 游标分页：WHERE id < lastId ORDER BY id DESC LIMIT 20;
+ *     2) 延迟关联：先查主键页，再 JOIN 回表取数据;
+ *     3) 对超大数据集考虑搜索引擎（ES）而非关系库分页。
  *
- *   Q: 列表查询很慢怎么办？
- *   A: 为过滤/排序字段加索引；避免 SELECT * 拉大字段；必要时用分页 Pageable。
- *
- *   Q: 如何避免 N+1？
- *   A: 对关联查询使用 @EntityGraph 或 JOIN FETCH 一次性加载所需关联。
+ * 四、count 查询的成本
+ * ----------------------------------------------------------------------------
+ *   Spring Data 会自动生成 count 查询，百万级表上可能是慢查询;
+ *   可用 Slice<T>（只查是否有下一页，不查总数）或自行优化 count SQL。
  * ============================================================================
  */

@@ -41,46 +41,50 @@ public class MessApplication {
 
     /*
      * ============================================================================
-     * 【设计文档】MessApplication 启动类与工程结构说明（补充文档，非可执行代码）
+     * 【阅读笔记】启动类注解拆解与启动流程（非可执行代码）
      * ============================================================================
      *
-     * 一、启动类的作用
+     * 一、@SpringBootApplication 是三个注解的组合
      * ----------------------------------------------------------------------------
-     * MessApplication 是整个 Spring Boot 应用的引导入口，@SpringBootApplication
-     * 触发自动配置与组件扫描，SpringApplication.run 完成上下文构建、Bean 装配、
-     * 内嵌容器启动等一系列引导动作，是"约定优于配置"理念的集中体现。
+     *   @SpringBootConfiguration
+     *       —— 本质是 @Configuration，声明这是配置类，可定义 @Bean;
+     *   @EnableAutoConfiguration
+     *       —— 启用自动配置：依据 classpath 依赖与已有 Bean，
+     *          从 spring.factories / AutoConfiguration.imports 中筛选并装配配置类;
+     *   @ComponentScan
+     *       —— 扫描当前包及其子包下的 @Component/@Service/@Repository/@Controller。
      *
-     * 二、包结构约定（组件扫描的隐含契约）
-     * ----------------------------------------------------------------------------
-     *   com.example.mess            —— 启动类所在根包，扫描起点;
-     *   com.example.mess.controller —— 表现层（Controller）;
-     *   com.example.mess.service    —— 业务层（Service）;
-     *   com.example.mess.repository —— 数据访问层（Repository）;
-     *   com.example.mess.entity     —— 持久化实体（Entity）;
-     *   com.example.mess.dto        —— 数据传输对象与统一响应（DTO/ApiResponse）;
-     *   com.example.mess.config     —— 配置类（SecurityConfig 等）;
-     *   com.example.mess.exception  —— 异常与全局处理器。
-     * 由于 @ComponentScan 默认扫描启动类所在包及子包，务必保证业务类位于该包树下。
+     *   关键推论：启动类所在包 = 组件扫描的根。若把启动类放到深层子包，
+     *   会漏扫兄弟包中的 Bean，导致"明明写了注解却注入不进来"。
      *
-     * 三、关键注解决策
+     * 二、启动流程（简化）
      * ----------------------------------------------------------------------------
-     * 决策 1：@EnableCaching 置于启动类
-     *   理由：缓存是全局横切能力，在入口开启使 @Cacheable 等注解全局生效;
-     *        具体缓存实现由 spring.cache.type 决定（simple 内存 / redis 分布式）。
-     * 决策 2：启动类保持"薄"，不写业务
-     *   理由：入口只负责引导，业务应分散到各分层组件，利于测试与维护。
+     *   1) 创建 SpringApplication，推断应用类型（Servlet / Reactive / None）;
+     *   2) 加载 ApplicationContextInitializer 与 ApplicationListener（SPI 机制）;
+     *   3) 准备 Environment：读取命令行参数 > 系统属性 > 环境变量 >
+     *      application-{profile}.yml > application.yml 等，后者优先级更低;
+     *   4) 创建并刷新 ApplicationContext：
+     *      BeanDefinition 注册 -> 实例化 -> 依赖注入 -> 初始化 -> 后置处理器;
+     *   5) 启动内嵌 Web 容器（默认 Tomcat），注册 DispatcherServlet;
+     *   6) 发布 ApplicationReadyEvent，此时 @PostConstruct / CommandLineRunner 已执行。
      *
-     * 四、启动流程速览
+     * 三、@EnableCaching 的作用
      * ----------------------------------------------------------------------------
-     *   main → SpringApplication.run → 创建 ApplicationContext
-     *        → 执行自动配置（数据源/JPA/缓存/安全等）
-     *        → 扫描并注册 Bean → 启动内嵌 Tomcat(8080) → 应用就绪。
+     *   开启基于注解的缓存基础设施，为 @Cacheable/@CacheEvict 提供代理支持。
+     *   若去掉该注解，缓存注解会静默失效（不报错但每次都查库），
+     *   这是排查"缓存没生效"时最常被忽略的一环。
      *
-     * 五、运行与配置提示
+     * 四、自定义启动行为的三种入口
      * ----------------------------------------------------------------------------
-     *   - 命令行参数可覆盖 application.yml 配置（如 --server.port=9090）;
-     *   - 多环境通过 spring.profiles.active 切换（如 test/dev/prod）;
-     *   - 测试用 @SpringBootTest 加载完整上下文，@ActiveProfiles 指定测试环境。
+     *   - ApplicationRunner / CommandLineRunner：启动后执行业务初始化;
+     *   - ApplicationContextInitializer：上下文 refresh 前调整配置;
+     *   - EnvironmentPostProcessor：比 Initializer 更早介入配置加载。
+     *
+     * 五、常见启动报错定位思路
+     * ----------------------------------------------------------------------------
+     *   - BeanCreationException：顺着 caused by 找第一个业务类;
+     *   - Port already in use：端口被占用，改 server.port 或结束占用进程;
+     *   - Failed to configure a DataSource：缺数据库依赖或配置。
      * ============================================================================
      */
 }

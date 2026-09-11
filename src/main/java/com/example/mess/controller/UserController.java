@@ -173,111 +173,76 @@ public class UserController {
 
     /*
      * ============================================================================
-     * 【设计文档】UserController RESTful 接口契约与设计说明（补充文档，非可执行代码）
+     * 【阅读笔记】Spring MVC 常用注解词典（非可执行代码）
      * ============================================================================
      *
-     * 一、层次定位与职责
+     * 一、路由与绑定
      * ----------------------------------------------------------------------------
-     * UserController 属于「表现层 / Web 层」，是 HTTP 世界与业务世界的边界适配器。
-     * 其职责被严格限定为：
-     *   1) 协议适配：解析 HTTP请求（路径变量、查询参数、请求体），产出 HTTP 响应；
-     *   2) 参数绑定与基础校验：借助 @Valid 触发 Bean Validation；
-     *   3) 结果包装：统一用 ApiResponse<T> 包裹返回体，保证响应结构一致；
-     *   4) 委派业务：将真正的业务处理下沉到 UserService，自身不含业务规则。
-     * 反之，事务、唯一性校验、对象转换等均不应出现在本类。
+     *   @RestController = @Controller + @ResponseBody
+     *       —— 组合体，所有返回值直接序列化为响应体;
+     *   @RequestMapping(path, method)
+     *       —— 类级限定前缀 + 方法级映射具体动作;
+     *   @GetMapping / @PostMapping / @PutMapping / @DeleteMapping
+     *       —— 对应 HTTP 动词的语义化写法，推荐;
+     *   @PathVariable / @RequestParam / @RequestBody
+     *       —— 从路径 / 查询串 / 请求体取参数;
+     *   @RequestHeader / @CookieValue
+     *       —— 定取 Header 或 Cookie 的值。
      *
-     * 二、RESTful 路由契约
+     * 二、参数校验
      * ----------------------------------------------------------------------------
-     *   HTTP 方法   路径                 语义              成功状态   典型失败
-     *   GET        /api/users           分页查询用户列表    200        —
-     *   GET        /api/users/{id}      查询单个用户        200        404(不存在)
-     *   POST       /api/users           创建用户           200/201    400(重复/校验)
-     *   DELETE     /api/users/{id}      删除用户           200        404(不存在)
+     *   @Valid 加在 @RequestBody 参数上才会触发 Hibernate Validator;
+     *   @Validated 来自 Spring，支持分组校验，比 @Valid 更灵活;
+     *   校验失败默认抛 MethodArgumentNotValidException，须由全局异常处理转 400。
      *
-     * 三、统一响应结构
+     * 三、响应定义
      * ----------------------------------------------------------------------------
-     *   所有接口返回 ApiResponse<T>，形如：
-     *     { "code": 200, "message": "success", "data": {...} }
-     *   删除等无返回体的操作 data 置为 null，仍保留统一外壳，
-     *   便于前端以固定结构解析，无需为每个接口定制反序列化逻辑。
+     *   @ResponseStatus(HttpStatus.CREATED) —— 给方法显式指定默认状态码;
+     *   ResponseEntity<T>               —— 需要自定义 Header / 状态码时携带体;
+     *   HttpHeaders / MultiValueMap     —— 需要返回多个同名 Header 时使用。
      *
-     * 四、关键设计决策
+     * 四、RESTful 风格自检
      * ----------------------------------------------------------------------------
-     * 决策 1：Controller 只返回 ApiResponse，不直接返回实体或 ResponseEntity
-     *   理由：统一响应契约降低前端心智负担；异常场景交由 GlobalExceptionHandler
-     *        统一兜底，Controller 内无需散落 try-catch。
+     *   [ ] 资源用复数名词（/users 而非 /user）
+     *   [ ] 语义明确：错误时有错误体，且携带 path/timestamp
+     *   [ ] 状态码语义正确（创建 201，查询 200，校验失败 400，冲突 409）
+     *   [ ] 幂等性：GET/PUT/DELETE 应可安全重试，POST 需考虑主键或唯一约束
      *
-     * 决策 2：分页参数通过 Pageable 自动绑定
-     *   理由：复用 Spring Data 的 page/size/sort 约定，避免手写分页参数解析。
-     *
-     * 决策 3：DELETE 成功返回 200 而非 204
-     *   理由：本项目约定所有响应统一走 ApiResponse 外壳，204 无响应体与该约定冲突，
-     *        故选择 200 + data:null 的折中方案。
-     *
-     * 五、典型调用示例（curl）
+     * 五、当前接口的应用示例
      * ----------------------------------------------------------------------------
-     *   # 分页查询
-     *   curl 'http://localhost:8080/api/users?page=0&size=10'
-     *   # 查询单个
-     *   curl 'http://localhost:8080/api/users/1'
-     *   # 创建
-     *   curl -X POST 'http://localhost:8080/api/users' \
-     *        -H 'Content-Type: application/json' \
-     *        -d '{"username":"alice","email":"a@x.com","name":"Alice"}'
-     *   # 删除
-     *   curl -X DELETE 'http://localhost:8080/api/users/1'
-     *
-     * 六、安全与跨域说明
-     * ----------------------------------------------------------------------------
-     *   - CSRF：SecurityConfig 中已禁用（无状态 REST API + Token 场景无需 CSRF）；
-     *   - 认证：受 SecurityConfig 的过滤链保护，具体放行规则见该类文档；
-     *   - 跨域：如需前端跨域访问，应在 SecurityConfig 或 WebMvcConfigurer 统一配置 CORS。
-     *
-     * 七、扩展指南
-     * ----------------------------------------------------------------------------
-     *   - 新增「更新用户」：补 PUT /api/users/{id}，委派 userService.updateUser；
-     *   - 需要字段级校验：在 UserDto 字段上添加 @NotBlank/@Email 等注解并配合 @Valid；
-     *   - 需要接口文档：引入 springdoc-openapi，注解自动生成 Swagger UI。
+     *   GET    /api/users        -> 列表查询
+     *   GET    /api/users/{id}   -> 资源定位查询
+     *   POST   /api/users        -> 创建请求，返回成功时 data 填充新对象
+     *   DELETE /api/users/{id}   -> 删除成功，返回 data=null 的成功响应
      * ============================================================================
      */
 
     /*
      * ============================================================================
-     * 【补充文档】UserController 错误码对照与联调 FAQ（非可执行代码）
+     * 【补充阅读】API 版本管理与接口演进（非可执行代码）
      * ============================================================================
      *
-     * 一、HTTP 状态码对照
+     * 一、四种常见版本方案
      * ----------------------------------------------------------------------------
-     *   200 OK               ：查询/操作成功，data 携带结果;
-     *   201 Created          ：创建成功（如需严格 REST 语义可返回 201 + Location）;
-     *   400 Bad Request      ：参数校验失败（@Valid 不通过、格式错误）;
-     *   401 Unauthorized     ：未认证或凭证无效;
-     *   403 Forbidden        ：已认证但无权限;
-     *   404 Not Found        ：资源不存在（ResourceNotFoundException）;
-     *   409 Conflict         ：唯一约束冲突（用户名/邮箱重复）;
-     *   500 Internal Error   ：服务端未预期异常，不透出堆栈。
+     *   1) URL 路径：/api/v1/users —— 最直观，网关路由友好，推荐首选;
+     *   2) 查询参数：/api/users?version=1 —— 侵入小，但缓存/路由不友好;
+     *   3) Header：Accept: application/vnd.demo.v1+json —— REST 味道足，调试麻烦;
+     *   4) 自定义 Header：X-Api-Version: 1 —— 简单，但跨工具兼容性一般。
      *
-     * 二、联调常见问题
+     * 二、演进原则
      * ----------------------------------------------------------------------------
-     *   Q: POST 请求返回 403 但已带 Token？
-     *   A: 若启用了 CSRF，需携带 CSRF Token；本项目安全配置已禁用 CSRF，
-     *      若仍 403 请检查权限规则与请求头 Content-Type 是否为 application/json。
+     *   - 只加不改：新版本只增字段/增接口，不删除不改语义;
+     *   - 旧版本设维护期，到期下线并提前公告;
+     *   - Swagger 分组展示各版本，前端明确锁定版本号;
+     *   - 破坏性变更（删字段/改类型/改语义）必须开新版本。
      *
-     *   Q: 请求体字段名对不上导致值为 null？
-     *   A: 确认 JSON 字段名与 DTO 属性一致（或用 @JsonProperty 映射），
-     *      并确保请求头 Content-Type: application/json。
-     *
-     *   Q: 中文乱码？
-     *   A: 统一使用 UTF-8；确认客户端与服务端编码一致，必要时配置
-     *      HttpMessageConverter 的默认字符集。
-     *
-     * 三、curl 快速自测
+     * 三、兼容性评审清单
      * ----------------------------------------------------------------------------
-     *   查询列表：curl -s http://localhost:8080/api/users
-     *   查询单个：curl -s http://localhost:8080/api/users/1
-     *   创建用户：curl -s -X POST http://localhost:8080/api/users \
-     *              -H "Content-Type: application/json" \
-     *              -d '{"username":"alice","email":"a@x.com"}'
+     *   [ ] 新增字段对旧客户端是否无害（可为 null、有默认值）
+     *   [ ] 删除字段是否已确认无消费方
+     *   [ ] 枚举新增取值旧客户端能否容错
+     *   [ ] 错误码结构是否保持一致
+     *   [ ] 分页格式、排序规则是否向后兼容
      * ============================================================================
      */
 }

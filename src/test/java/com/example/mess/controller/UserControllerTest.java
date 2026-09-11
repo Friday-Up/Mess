@@ -220,64 +220,42 @@ class UserControllerTest {
 
     /*
      * ============================================================================
-     * 【测试设计文档】UserControllerTest Web 层测试策略说明（补充文档，非可执行代码）
+     * 【阅读笔记】MockMvc 与 jsonPath 速查（非可执行代码）
      * ============================================================================
      *
-     * 一、测试目标与范围
+     * 一、两种 MockMvc 构建方式对比
      * ----------------------------------------------------------------------------
-     * 本类聚焦 UserController 的"Web 层契约"：URL 路由、HTTP 方法、请求参数绑定、
-     * 状态码、响应 JSON 结构等，而非业务逻辑本身（业务由 UserServiceTest 覆盖）。
-     * UserService 被 mock 掉，测试只关心"HTTP 进 → 委派 Service → 响应出"这条链路。
+     *   standaloneSetup(controller)
+     *       —— 只装该 Controller，不加载过滤链/拦截器/异常处理;
+     *       快，轻，适合纯"Controller 单测";
+     *       不能测认证/全局异常的行为，需要配合 @InjectMocks。
+     *   @WebMvcTest(UserController.class) + MockMvc
+     *       —— Spring Boot 提供的 Web 切片，加载默认配置、
+     *          JsonMapper、全局异常处理器等多种基础设施;
+     *       @MockBean 替换容器中的服务，更接近真实段段调用。
      *
-     * 二、MockMvc 两种搭建方式对比
+     * 二、请求构建 API
      * ----------------------------------------------------------------------------
-     *   standaloneSetup(controller)：
-     *     - 仅加载指定 Controller，不启动完整 Spring 上下文，最轻量最快;
-     *     - 不含安全过滤链/全局异常处理器等，需要时须手动注册;
-     *   @WebMvcTest(Controller.class)：
-     *     - 加载 Web 切片（Controller + 相关 Web 组件 + 自动配置）;
-     *     - 更接近真实运行环境，会应用 GlobalExceptionHandler、消息转换器等;
-     *     - 需用 @MockBean 提供 Service 等协作者。
-     *   选型取决于要不要覆盖过滤链/异常映射等 Web 基础设施行为。
+     *   mockMvc.perform(get("/api/users/1"))  // 还有 post/put/delete
+     *          .contentType(MediaType.APPLICATION_JSON)
+     *          .content("{\"username\":\"a\"}")
+     *          .header("Authorization", "Bearer xxx")
+     *          .param("page", "0")
+     *          .andExpect(...).andReturn();
      *
-     * 三、请求-响应断言工具
+     * 三、常用断言链
      * ----------------------------------------------------------------------------
-     *   mockMvc.perform(get/post/delete(...)) —— 发起模拟请求;
-     *   andExpect(status().isOk())            —— 断言 HTTP 状态;
-     *   andExpect(jsonPath("$.data.id").value(1)) —— 用 JsonPath 断言响应体字段;
-     *   jsonPath 配合 hasSize/is 等 Hamcrest 匹配器可做集合与值断言。
+     *   .andExpect(status().isOk()).andExpect(status().isCreated());
+     *   .andExpect(jsonPath("$.code").value(200));
+     *   .andExpect(jsonPath("$.data", hasSize(3)));
+     *   .andExpect(jsonPath("$.data[0].username", is("alice")));
+     *   JsonPath 支持过滤（$.data[?(@.id==1)]）与取长度，功能比基础断言强。
      *
-     * 四、用例覆盖矩阵
+     * 四、与集成测试的分工
      * ----------------------------------------------------------------------------
-     *   GET  列表      —— 返回分页/列表结构，jsonPath 校验元素;
-     *   GET  单个      —— 命中返回 200 + data;
-     *   POST 创建      —— 传 JSON 请求体，any(User.class) 匹配任意入参对象;
-     *   DELETE 删除    —— 返回 200，verify 删除交互;
-     *   反例          —— 参数非法/资源不存在时的状态码与错误结构。
-     *
-     * 五、关键测试决策
-     * ----------------------------------------------------------------------------
-     * 决策 1：mock UserService，隔离业务与数据库
-     *   理由：Web 层测试只验证协议适配，业务正确性由 Service 测试保证，职责单一。
-     * 决策 2：使用 any(User.class) 匹配创建入参
-     *   理由：Controller 会将 JSON 反序列化为新对象，其引用与测试构造对象不同，
-     *        用 any 匹配可避免因对象身份不等导致的匹配失败。
-     * 决策 3：对删除路径断言 never() / verify 次数
-     *   理由：确保非法请求不会误触发 Service 写操作，防止副作用泄漏。
-     * 决策 4：POST 测试需保证 CSRF 不拦截
-     *   理由：SecurityConfig 已禁用 CSRF；若使用 @WebMvcTest 且启用安全，
-     *        则需 with(csrf()) 或放行策略，否则 POST 会被 403 拦截。
-     *
-     * 六、注意事项
-     * ----------------------------------------------------------------------------
-     *   ! jsonPath 路径需与 ApiResponse 实际结构一致（$.data.xxx）;
-     *   ! 请求体需设置 contentType(MediaType.APPLICATION_JSON);
-     *   ! standaloneSetup 不会应用 GlobalExceptionHandler，除非显式 setControllerAdvice。
-     *
-     * 七、如何运行
-     * ----------------------------------------------------------------------------
-     *   仅本类：   mvn -Dtest=UserControllerTest test
-     *   仅某方法： mvn -Dtest=UserControllerTest#createUser test
+     *   本类：Controller 层单测，内存运行，每次 CI 都跑;
+     *   选 Service 单测：只测业务决策与依赖调用;
+     *   选 @SpringBootTest 集成：覆盖仓库/事务/序列化全链，只挑关键用例。
      * ============================================================================
      */
 }
