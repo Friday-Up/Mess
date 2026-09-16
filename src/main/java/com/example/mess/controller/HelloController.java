@@ -129,33 +129,35 @@ public class HelloController {
 
     /*
      * =========================================================================
-     * 【检查清单】演示端点自检表（非可执行代码）
+     * 【面试问答】关于日志与配置注入的常见面试题（非可执行代码）
      * =========================================================================
      *
-     * [ ] 不含业务逻辑，只验证"框架能通"
-     * [ ] 日志用占位符 {} 拼接，不用字符串 +
-     * [ ] @Value 有兜底值（${app.xxx:default}），无配置也能启动
-     * [ ] 不依赖数据库/缓存，独立可验证
+     * Q1: 为什么用 SLF4J 的占位符 {} 而不用字符串拼接？
+     * A1: 占位符在日志级别不满足时不产生拼接开销；字符串拼接总会执行。
+     *     log.info("user: " + user) 即使日志级别是 WARN 也拼接了字符串。
      *
-     * 日志排障速查
-     *   现象：日志不输出
-     *     -> 检查 logback 配置中 logger level 是否 >= INFO
-     *     -> 检查 appender ref 是否正确绑定
-     *     -> 检查是否用了正确的 SLF4J 接口（别混用 java.util.logging）
+     * Q2: @Value("${key:default}") 的 default 是什么？
+     * A2: 冒号后面是兜底值，配置项不存在时用它，避免启动报
+     *     "Could not resolve placeholder"。配置存在时忽略兜底值。
      *
-     *   现象：日志太多/太少
-     *     -> 按包名调 level：logging.level.com.example.mess=DEBUG
-     *     -> 生产环境根 logger 设 WARN，只对业务包开 INFO
+     * Q3: @Value 改了配置为什么不生效？
+     * A3: @Value 在 Bean 初始化时注入一次，运行时配置变更不会自动刷新。
+     *     需要 @RefreshScope（Spring Cloud Config）+ /actuator/refresh。
      *
-     *   现象：日志没有 traceId，链路追踪断裂
-     *     -> 接入 MDC（Mapped Diagnostic Context）在过滤器中注入 traceId
-     *     -> logback pattern 中加 %X{traceId} 输出
+     * Q4: 日志不输出怎么办？
+     * A4: 检查链路：
+     *     1) logback.xml 中 logger level >= 当前日志级别（INFO 日志需要 >= INFO）
+     *     2) appender ref 绑定到该 logger
+     *     3) 用的是 SLF4J 接口（别混用 java.util.logging）
      *
-     * @Value 注入排障
-     *   现象：启动报 Could not resolve placeholder
-     *     -> 配置项不存在且没给兜底值，加 :default 解决
-     *   现象：配置改了但不生效
-     *     -> @Value 是启动时注入一次，运行时变更需 @RefreshScope + 配置中心
+     * Q5: 日志没有 traceId 怎么排查？
+     * A5: 在过滤器中用 MDC.put("traceId", uuid) 注入，
+     *     logback pattern 加 %X{traceId} 输出。
+     *     跨服务用 Sleuth/OpenTelemetry 自动传递。
+     *
+     * Q6: @Value 和 @ConfigurationProperties 怎么选？
+     * A6: 单个值用 @Value；批量绑定一组配置用 @ConfigurationProperties，
+     *     后者支持松散绑定、JSR303 校验、整体刷新。
      * =========================================================================
      */
 }

@@ -91,61 +91,39 @@ public interface UserRepository extends JpaRepository<User, Long> {
 
 /*
  * =========================================================================
- * 【检查清单】Repository 层性能与正确性自检表（非可执行代码）
+ * 【面试问答】关于 Spring Data JPA 的常见面试题（非可执行代码）
  * =========================================================================
  *
- * [ ] 查询方法名语义清晰，不需要看实现就能推断 SQL
- * [ ] 存在性判断用 existsBy 而非 findBy（省一次实体映射）
- * [ ] 只读方法加 @Transactional(readOnly = true)
- * [ ] 分页用 Pageable，不用手写 limit/offset
- * [ ] 排序字段白名单校验，不把前端入参直接拼进 SQL
- * [ ] N+1 查询用 @EntityGraph 或 JOIN FETCH 解决
- * [ ] 批量删除用原生 SQL 或批量 API，不用循环逐条 delete
+ * Q1: JpaRepository、CrudRepository、Repository 有什么区别？
+ * A1: Repository 是标记接口；CrudRepository 加了基础 CRUD；
+ *     PagingAndSortingRepository 加了分页排序；
+ *     JpaRepository 再加批量操作和 flush。日常直接继承 JpaRepository。
  *
- * 性能排障速查
- *   现象：列表接口慢
- *     -> 开 SQL 日志看查询数，N+1 会打出成倍 SQL
- *     -> EXPLAIN 看执行计划是否走索引
- *     -> 检查是否有 SELECT * 拉了大字段（text/blob）
+ * Q2: 派生方法名的命名规则是什么？
+ * A2: find/exists/count + By + 字段名 + 关键词。
+ *     findByUsernameAndEmail -> WHERE username=? AND email=?
+ *     findByUsernameOrderByIdDesc -> ORDER BY id DESC
+ *     名称太长或太复杂时就写 @Query JPQL。
  *
- *   现象：分页翻到后面越来越慢
- *     -> 深分页问题，LIMIT offset 很大时数据库要扫描并丢弃
- *     -> 改用游标分页（WHERE id < lastId）
+ * Q3: existsBy 和 findBy 哪个判断存在性更好？
+ * A3: existsBy。底层用 SELECT COUNT 或 EXISTS，不加载实体，开销更小。
  *
- *   现象：count 很慢
- *     -> 百万级表 count(*) 本身就慢
- *     -> 用 Slice 替代 Page（只判断有没有下一页，不算总数）
- * =========================================================================
- */
-
-/*
- * =========================================================================
- * 【补充手册】JPA 关联映射与 N+1 问题速查（非可执行代码）
- * =========================================================================
+ * Q4: 什么是 N+1 问题？怎么解决？
+ * A4: 查 N 条主记录，每条的关联懒加载触发一条额外 SQL，共 N+1 条。
+ *     解决：JOIN FETCH 一次查出；@EntityGraph 声明式预加载；
+ *     或 hibernate.batch_fetch_size 分批 IN 查询。
  *
- * 一、关联关系注解速查
- *   @OneToMany   一对多（如 User -> Orders），默认 LAZY
- *   @ManyToOne   多对一（如 Order -> User），默认 EAGER（注意性能）
- *   @ManyToMany  多对多，需中间表 @JoinTable
- *   @OneToOne    一对一，可共享主键或外键
+ * Q5: 深分页为什么慢？怎么优化？
+ * A5: LIMIT 100000,20 要扫描前 100020 行再丢弃，offset 越大越慢。
+ *     优化：游标分页 WHERE id < lastId；或先查主键页再 JOIN 回表。
  *
- *   关键参数：
- *     fetch = FetchType.LAZY    延迟加载（用的时候才查）
- *     fetch = FetchType.EAGER   立即加载（查主实体时 JOIN 关联）
- *     cascade = CascadeType.ALL 级联操作（删父连子一起删）
- *     orphanRemoval = true      孤儿删除（子脱离父集合即删除）
+ * Q6: @Modifying 为什么要配 @Transactional？
+ * A6: @Modifying 标识 UPDATE/DELETE，属于写操作，必须在事务内执行。
+ *     没有 @Transactional 会报 TransactionRequiredException。
  *
- * 二、N+1 问题
- *   现象：查 N 个用户，每个用户再查一次关联订单 -> 共 N+1 条 SQL
- *   检测：开 SQL 日志（spring.jpa.show-sql=true），看查询数是否异常
- *   解决方案：
- *     1) JOIN FETCH：一次 JOIN 查出主实体+关联（JPQL 中写）
- *     2) @EntityGraph：声明式指定关联图，运行时自动 JOIN
- *     3) 批量加载：hibernate.batch_fetch_size=20（分批 IN 查询）
- *
- * 三、JPA vs MyBatis 选择参考
- *   JPA：标准 ORM，适合 CRUD 为主的简单业务，对象导航方便
- *   MyBatis：SQL 驱动，适合复杂查询/报表/多表 JOIN，SQL 可控
- *   混用：简单 CRUD 用 JPA，复杂报表用 MyBatis，各取所长
+ * Q7: JPA 和 MyBatis 怎么选？
+ * A7: JPA 适合 CRUD 为主的简单业务，对象导航方便；
+ *     MyBatis 适合复杂 SQL/报表/多表 JOIN，SQL 可控性更强。
+ *     可混用：简单 CRUD 用 JPA，复杂报表用 MyBatis。
  * =========================================================================
  */

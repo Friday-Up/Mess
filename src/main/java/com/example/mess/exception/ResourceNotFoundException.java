@@ -60,28 +60,35 @@ public class ResourceNotFoundException extends RuntimeException {
 
     /*
      * =========================================================================
-     * 【检查清单】自定义异常自检表（非可执行代码）
+     * 【面试问答】关于自定义异常的常见面试题（非可执行代码）
      * =========================================================================
      *
-     * [ ] 继承 RuntimeException（unchecked，不污染 Service 方法签名）
-     * [ ] 提供无参构造（默认文案）和带 message 构造（动态信息）
-     * [ ] 异常名见名知义（ResourceNotFoundException > BizException）
-     * [ ] message 带上下文（"用户ID=123不存在" > "资源不存在"）
-     * [ ] 有对应 @ExceptionHandler，不会漏到 500 兜底
+     * Q1: 为什么继承 RuntimeException 而不是 Exception？
+     * A1: RuntimeException 是 unchecked，调用方不必 try-catch 或 throws，
+     *     Service 方法签名保持干净。配合全局异常处理器统一收敛。
+     *     若继承 Exception（checked），每个调用层都要声明，代码膨胀。
      *
-     * 常见误区
-     *   - 继承 Exception（checked）-> 每个调用方都要 try-catch 或 throws，代码膨胀
-     *   - 一个异常类打天下 -> 无法在全局处理器里精确映射状态码
-     *   - 异常 message 带 SQL/堆栈 -> 泄露技术细节给前端
-     *   - 每个字段一个异常类 -> 类爆炸，维护成本远超收益
+     * Q2: 一个项目应该设计多少个异常类？
+     * A2: 按 HTTP 语义维度建，不是按字段维度：
+     *     ResourceNotFoundException -> 404
+     *     DuplicateResourceException -> 409
+     *     ValidationException -> 400
+     *     OperationNotAllowedException -> 403
+     *     不必每个字段一个异常类，维护成本远超收益。
      *
-     * 推荐的异常层次设计
-     *   RuntimeException
-     *     └─ BusinessException（可选中间层，统一标记业务异常）
-     *          ├─ ResourceNotFoundException   -> 404
-     *          ├─ DuplicateResourceException   -> 409
-     *          ├─ ValidationException          -> 400
-     *          └─ OperationNotAllowedException -> 403
+     * Q3: 异常 message 应该写什么？
+     * A3: 面向用户的可读文案 + 关键上下文。
+     *     "用户ID=123不存在" 比 "资源不存在" 更有利于排障。
+     *     不要带 SQL/表名/堆栈（安全风险）。
+     *
+     * Q4: 自定义异常需要序列化吗？
+     * A4: 如果可能跨网络传输（如 RPC），需实现 Serializable。
+     *     本项目内 Web API 不需要，全局处理器把异常转为 JSON 响应即可。
+     *
+     * Q5: 为什么不在 Controller 里 try-catch？
+     * A5: Controller 应保持轻薄。异常处理集中在全局处理器，
+     *     Controller 只管"正常路径"，异常路径由框架兜底。
+     *     到处 try-catch 返回错误 JSON 会导致重复代码和遗漏。
      * =========================================================================
      */
 }

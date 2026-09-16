@@ -148,61 +148,75 @@ public class User {
 
     /*
      * =========================================================================
-     * 【检查清单】JPA 实体维护自检表（非可执行代码）
+     * 【面试问答】关于 JPA 实体的常见面试题（非可执行代码）
      * =========================================================================
      *
-     * [ ] 无参构造器存在（JPA 反射需要，编译器默认提供，加了有参构造后须显式补）
-     * [ ] 类非 final（Hibernate 用 CGLIB 代理，final 类会报错）
-     * [ ] 主键标注 @Id 且有 @GeneratedValue 策略
-     * [ ] 唯一业务字段在数据库层有唯一索引兜底（不依赖应用层检查）
-     * [ ] 不直接把实体序列化返回前端（用 DTO 隔离，防止泄露内部字段）
-     * [ ] equals/hashCode 基于稳定字段（推荐 id 或业务唯一键，不用可变字段）
-     * [ ] 关联关系默认 LAZY（避免无谓 JOIN 和 N+1）
-     * [ ] 实体变更通过 Service 层在事务内完成（脱离事务的"脏检查"不会落库）
+     * Q1: @GeneratedValue 的几种策略有什么区别？
+     * A1: IDENTITY 用数据库自增列（MySQL 常用），不能预分配，批量插入慢；
+     *     SEQUENCE 用数据库序列（Oracle/PG），可预分配，批量快；
+     *     TABLE 用表模拟序列，跨库但性能差；AUTO 由方言自动选。
      *
-     * 常见线上事故
-     *   - 实体直接做 API 返回，前端拿到 password 等敏感字段 -> 安全漏洞
-     *   - toString 包含懒加载关联，序列化时触发 N+1 或 LazyInitializationException
-     *   - 两个"相同"实体放入 HashSet 后找不回来 -> hashCode 基于可变字段
-     *   - 事务外修改实体字段 -> 期望自动保存但无任何反应
+     * Q2: 实体为什么不能是 final 类？
+     * A2: Hibernate 用 CGLIB 生成代理子类实现懒加载，final 类无法被继承。
+     *
+     * Q3: 实体的四种状态是什么？
+     * A3: New（新建，未持久化）、Managed（受管，脏检查自动同步）、
+     *     Detached（游离，脱离上下文）、Removed（待删除）。
+     *     persist 让 New -> Managed；merge 让 Detached -> Managed（返回新实例）。
+     *
+     * Q4: 为什么不建议把实体直接返回给前端？
+     * A4: 1) 泄露内部字段（如 password、内部标识）；
+     *     2) 懒加载关联在序列化时触发 N+1 或 LazyInitializationException；
+     *     3) 接口契约与表结构耦合，表改动直接影响前端。
+     *     正确做法：转 DTO 隔离。
+     *
+     * Q5: ddl-auto 设什么值？
+     * A5: 开发用 update（自动加列），测试用 create（每次重建），
+     *     生产用 none 或 validate，DDL 由 Flyway/Liquibase 管理。
+     *
+     * Q6: equals/hashCode 应基于哪个字段？
+     * A6: 推荐基于业务唯一键（如 username）或 id。不用可变字段，
+     *     否则对象放入 HashSet 后修改字段会导致找不到。
      * =========================================================================
      */
 
     /*
      * =========================================================================
-     * 【补充手册】实体生命周期与主键策略速查（非可执行代码）
+     * 【源码走读】Hibernate 脏检查与一级缓存（非可执行代码）
      * =========================================================================
      *
-     * 一、JPA 实体四种状态
-     *   新建（New）       —— new 出来还没 persist，不受 EntityManager 管理
-     *   持久（Managed）   —— 在持久化上下文中，字段变更自动同步到数据库（脏检查）
-     *   游离（Detached）  ——曾被管理但已脱离上下文，变更不会自动落库
-     *   删除（Removed）   —— 被标记删除，flush 后从数据库移除
+     * 一、脏检查（Dirty Checking）
+     *    当实体处于 Managed 状态时，Hibernate 在事务提交前对比
+     *    "当前快照"与"数据库读入时的快照"，发现差异自动生成 UPDATE。
+     *    开发者不需要显式调用 save()，修改字段 + 提交事务即可落库。
      *
-     *   状态转换方法：
-     *     persist(new)   -> Managed
-     *     merge(detached) -> 返回新的 Managed 实例
-     *     remove(managed) -> Removed -> flush 后删除
-     *     clear()         -> 所有 Managed 变 Detached
-     *     refresh(managed)-> 从数据库重新加载覆盖内存值
+     *    注意：
+     *    - 只在持久化上下文（Session/EntityManager）内有效
+     *    - 事务外修改 Detached 实体不会触发脏检查（不会落库）
+     *    - @Transactional 方法返回后，实体可能仍为 Managed，
+     *      序列化时访问懒加载关联会触发额外查询
      *
-     * 二、主键生成策略对比
-     *   IDENTITY  —— 数据库自增列（MySQL AUTO_INCREMENT）
-     *                优点：简单；缺点：不能预分配，批量插入慢
-     *   SEQUENCE  —— 数据库序列（Oracle/PostgreSQL）
-     *                优点：可预分配，批量快；MySQL 不支持原生序列
-     *   TABLE     —— 用表模拟序列
-     *                优点：跨数据库；缺点：性能差，几乎不用
-     *   AUTO      —— 由方言自动选择（默认）
-     *                注意：MySQL 下 AUTO 会选 IDENTITY
+     * 二、一级缓存（Persistence Context）
+     *    每个 Session（事务）维护一个一级缓存（Map<id, entity>）。
+     *    同一事务内多次 findById(id) 只查一次数据库，后续从缓存取。
+     *    事务结束（Session 关闭）后缓存清空，实体变 Detached。
      *
-     * 三、自动建表与生产实践
-     *   spring.jpa.hibernate.ddl-auto 可选值：
-     *     none      不操作（生产推荐）
-     *     validate  只校验不建表（生产可用）
-     *     update    自动加列不删列（开发可用，生产禁用）
-     *     create    每次启动删表重建（仅测试用）
-     *   生产环境用 Flyway/Liquibase 管理 DDL，不依赖 Hibernate 自动建表
+     *    这意味着：
+     *    - 同一事务内修改实体后再查，拿到的是修改后的内存值（不是数据库值）
+     *    - 跨事务不共享一级缓存
+     *    - 大事务中加载大量实体会导致一级缓存膨胀，内存压力大
+     *
+     * 三、二级缓存（可选）
+     *    跨 Session 共享的缓存，需显式配置（如 Ehcache/Redis）。
+     *    @Cache(usage=READ_WRITE) 标注实体或集合。
+     *    适合读多写少的字典数据，不适合频繁变更的业务数据。
+     *
+     * 四、@Version 乐观锁
+     *    实体加 @Version 字段，UPDATE 时自动 WHERE version = ?，
+     *    版本不匹配则抛 OptimisticLockException。
+     *    适合"并发更新概率低、冲突时让用户重试"的场景。
+     *    对比悲观锁（SELECT ... FOR UPDATE）：乐观锁不锁行，性能好，
+     *    但冲突时需要业务层处理重试。
      * =========================================================================
      */
 }

@@ -56,30 +56,39 @@ class MessApplicationTests {
 
     /*
      * =========================================================================
-     * 【检查清单】集成测试自检表（非可执行代码）
+     * 【面试问答】关于集成测试的常见面试题（非可执行代码）
      * =========================================================================
      *
-     * [ ] @ActiveProfiles("test") 隔离测试环境（内存库/独立数据源）
-     * [ ] contextLoads() 验证完整上下文能装配（Bean 冲突/配置缺失会在这里暴露）
-     * [ ] 测试间无数据依赖（每个测试自备数据，不依赖执行顺序）
-     * [ ] @Transactional + @Rollback 隔离数据变更（或用 @DirtiesContext）
-     * [ ] 不依赖外部服务（真实数据库/MQ/Redis），用 Testcontainers 或 Mock
+     * Q1: @SpringBootTest 和 @WebMvcTest 的区别？
+     * A1: @SpringBootTest 启动完整应用上下文（含数据库/缓存/全部 Bean），
+     *     最重最慢，适合关键链路的端到端验证；
+     *     @WebMvcTest 只装 Web 层（Controller + MVC 基础设施），
+     *     Service/Repository 用 @MockBean 替换，轻快，适合 Controller 单测。
      *
-     * 常见排障
-     *   现象：contextLoads 失败
-     *     -> Bean 定义冲突：检查 @Bean 与 @ComponentScan 范围
-     *     -> 配置缺失：test profile 缺必需属性
-     *     -> 循环依赖：A 依赖 B、B 依赖 A，需 @Lazy 或重构
+     * Q2: 为什么空方法体也能验证上下文加载？
+     * A2: @SpringBootTest 在测试执行前构建 ApplicationContext，
+     *     构建失败会直接抛异常导致测试失败。方法体为空时，
+     *     "能执行到这里"本身就证明上下文加载成功。
      *
-     *   现象：测试本地通过但 CI 失败
-     *     -> 时区差异：CI 用 UTC，本地用 GMT+8，时间断言不一致
-     *     -> 数据残留：测试依赖前一个测试的数据，CI 并行执行时被清空
-     *     -> 资源路径：src/test/resources 下缺少 CI 依赖的配置文件
+     * Q3: @ActiveProfiles("test") 做什么？
+     * A3: 激活 test profile，加载 application-test.yml。
+     *     通常指向内存数据库（H2）和独立配置，不污染开发/生产环境。
      *
-     *   现象：测试很慢
-     *     -> @SpringBootTest 每次都启动完整上下文
-     *     -> 用 @MockBean 替换重型依赖减少初始化
-     *     -> 用 @TestPropertySource 或 properties 属性关闭不需要的自动配置
+     * Q4: 测试本地通过 CI 失败常见原因？
+     * A4: 1) 时区差异（CI 用 UTC，时间断言不一致）；
+     *     2) 测试间数据依赖（CI 并行执行时数据被清空）；
+     *     3) 资源文件缺失（src/test/resources 下配置不全）。
+     *
+     * Q5: 测试很慢怎么优化？
+     * A5: 1) 用切片测试（@WebMvcTest/@DataJpaTest）替代全量启动；
+     *     2) @MockBean 替换重型依赖减少初始化；
+     *     3) 用 @TestPropertySource 关闭不需要的自动配置；
+     *     4) 分层运行：CI 中快速层每次跑，全量层每日跑。
+     *
+     * Q6: 测试金字塔是什么？
+     * A6: 底层单元测试最多最快（70%），中层切片测试次之（20%），
+     *     顶层集成测试最少最慢（10%）。倒金字塔（只有集成测试）
+     *     会导致 CI 慢、问题定位难。
      * =========================================================================
      */
 }

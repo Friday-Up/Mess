@@ -82,67 +82,35 @@ public class GlobalExceptionHandler {
 
     /*
      * =========================================================================
-     * 【检查清单】异常处理自检表（非可执行代码）
+     * 【面试问答】关于全局异常处理的常见面试题（非可执行代码）
      * =========================================================================
      *
-     * [ ] 业务异常有对应 @ExceptionHandler，映射到正确 HTTP 状态码
-     * [ ] 参数校验异常返回 400 且附带字段级错误信息
-     * [ ] 未知异常兜底返回 500，不把堆栈/e.getMessage() 给前端
-     * [ ] 5xx 记 ERROR 日志（带堆栈），4xx 记 WARN（不记堆栈）
-     * [ ] 响应体含 path 字段，便于日志关联
+     * Q1: @RestControllerAdvice 和 @ControllerAdvice 的区别？
+     * A1: @RestControllerAdvice = @ControllerAdvice + @ResponseBody。
+     *     前者返回值自动序列化为 JSON，后者可能返回视图。
+     *     REST API 项目统一用 @RestControllerAdvice。
      *
-     * 异常排障速查
-     *   现象：自定义异常被当成 500 而非 404
-     *     -> 检查 @ExceptionHandler 的类型是否精确匹配
-     *     -> 检查是否有更宽泛的 Exception handler 抢先匹配
+     * Q2: @ExceptionHandler 的匹配优先级？
+     * A2: 优先匹配精确类型。ResourceNotFoundException 比 RuntimeException 优先，
+     *     RuntimeException 比 Exception 优先。继承距离最近的优先。
      *
-     *   现象：@Valid 校验失败返回 500 而非 400
-     *     -> 没有 @ExceptionHandler(MethodArgumentNotValidException.class)
-     *     -> 该异常冒泡到兜底 handler 被当成未知异常
+     * Q3: 校验失败为什么返回 500 而不是 400？
+     * A3: 没有 @ExceptionHandler(MethodArgumentNotValidException.class)，
+     *     异常冒泡到兜底的 Exception handler 被当成 500。
+     *     需单独捕获并返回 400 + 字段级错误信息。
      *
-     *   现象：全局异常处理器本身抛异常
-     *     -> handler 内部逻辑有 bug（如 NPE），导致二次异常
-     *     -> 解决：handler 内保持极简，只做映射和日志
+     * Q4: 异常被 catch 吞了怎么办？
+     * A4: catch 后不抛出 -> @Transactional 不回滚 -> 全局处理器收不到。
+     *     这是"事务没回滚"的最常见原因之一。原则：要么抛，要么记录后补偿。
      *
-     *   现象：前端拿不到统一格式
-     *     -> Security 过滤器链中的异常（401/403）不经过 @RestControllerAdvice
-     *     -> 需要单独配置 AuthenticationEntryPoint / AccessDeniedHandler
-     * =========================================================================
-     */
-
-    /*
-     * =========================================================================
-     * 【补充手册】异常分类与日志级别速查（非可执行代码）
-     * =========================================================================
+     * Q5: 5xx 异常应该记什么日志级别？
+     * A5: ERROR 级，带完整堆栈（log.error(msg, e) 不是 log.error(e.getMessage())）。
+     *     4xx 记 WARN，不需要堆栈。预期内业务异常（如 404）记 WARN 或 INFO。
      *
-     * 一、异常分类决策树
-     *   客户端传入参数有问题？
-     *     -> 4xx（不重试，改了请求再试）
-     *   服务端代码有 bug 或依赖故障？
-     *     -> 5xx（可告警，可有限重试）
-     *   资源不存在？
-     *     -> 404（不是错误，是"没有"）
-     *   权限不够？
-     *     -> 403（不泄露"存在但无权"，与 404 区分要谨慎）
-     *
-     * 二、日志级别与异常的对应关系
-     *   4xx 客户端错误 -> WARN（不是 bug，是用户用错了）
-     *   5xx 服务端错误 -> ERROR（带完整堆栈，需要人介入）
-     *   预期内的业务异常（如 ResourceNotFoundException）-> WARN 或 INFO
-     *   限流/熔断 -> WARN（系统在自我保护，不是故障）
-     *
-     *   注意：不要把所有异常都 log.error(e.getMessage())，
-     *   丢失堆栈的 ERROR 日志等于没有信息。
-     *
-     * 三、不吞异常原则
-     *   反模式：catch (Exception e) { log.error("出错了"); return null; }
-     *   问题：异常被吞，上层以为成功，数据不一致，排查到崩溃。
-     *   正确做法：要么抛出（让全局处理器兜底），要么记录后做补偿。
-     *
-     * 四、告警阈值参考
-     *   5xx 速率 > 1%/分钟 -> 触发告警
-     *   4xx 速率 > 10%/分钟 -> 可能是接口变更或攻击，关注但不告警
-     *   单接口 5xx 突增 -> 先看发布记录，再看依赖状态
+     * Q6: 如何让异常响应也携带 traceId？
+     * A6: 在过滤器中用 MDC 注入 traceId，全局处理器从 MDC 取并放入
+     *     ApiResponse 的字段，同时 logback pattern 输出 %X{traceId}。
+     *     用户反馈问题时提供 traceId，直接定位日志行。
      * =========================================================================
      */
 }

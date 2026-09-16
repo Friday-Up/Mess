@@ -123,62 +123,34 @@ public class UserDto {
 
     /*
      * =========================================================================
-     * 【检查清单】DTO 安全与命名自检表（非可执行代码）
+     * 【面试问答】关于 DTO 的常见面试题（非可执行代码）
      * =========================================================================
      *
-     * [ ] 敏感字段（密码/盐/内部ID）不在 DTO 中出现，或加 @JsonIgnore
-     * [ ] 时间字段加 @JsonFormat 指定 pattern 和 timezone（否则前端拿到数组）
-     * [ ] 输入 DTO 有校验注解（@NotBlank/@Email/@Size），配合 @Valid 触发
-     * [ ] 输出 DTO 不含 null 字段（加 @JsonInclude(NON_NULL) 减小报文）
-     * [ ] 字段命名用驼峰，JSON 默认也是驼峰，前后端一致
-     * [ ] DTO 与实体一对一明确对应，不要一个 DTO 混装多个业务场景的数据
-     * [ ] 枚举字段用字符串或 int，序列化稳定且向前兼容
+     * Q1: 为什么需要 DTO？直接返回实体不行吗？
+     * A1: DTO 解耦接口与表结构、裁剪敏感字段、承载校验注解、组合多源数据。
+     *     直接返回实体会泄露内部字段、触发懒加载异常、接口与数据库强耦合。
      *
-     * 命名约定建议
-     *   XxxCreateDto   —— 创建请求
-     *   XxxUpdateDto   —— 更新请求（允许部分字段为 null）
-     *   XxxQueryDto    —— 查询条件
-     *   XxxVo          —— 只读响应视图
-     *   XxxDto         —— 通用兜底（小项目不分这么多类）
+     * Q2: DTO 和 VO 有什么区别？
+     * A2: 严格区分时：DTO 侧重传输（可入可出），VO 侧重展示（只读）。
+     *     小项目通常混用不细分，大项目按场景拆：CreateDto/UpdateDto/QueryVo。
      *
-     * 安全提醒
-     *   - 永远不要信任客户端，输入 DTO 是防御边界
-     *   - 输出 DTO 是最小暴露原则的载体，能不给的就不给
-     *   - 用 MapStruct 做映射时注意字段映射覆盖率，漏映射等于漏字段
-     * =========================================================================
-     */
-
-    /*
-     * =========================================================================
-     * 【补充手册】校验注解与 MapStruct 映射速查（非可执行代码）
-     * =========================================================================
+     * Q3: @Valid 和 @Validated 的区别？
+     * A3: @Valid 是 JSR 标准，支持嵌套校验但不支持分组；
+     *     @Validated 是 Spring 扩展，支持分组校验（groups）。
+     *     方法参数上用 @Valid 触发校验，需要分组时改用 @Validated(Group.class)。
      *
-     * 一、Hibernate Validator 常用注解
-     *   @NotNull      字段不为 null（允许空字符串）
-     *   @NotBlank     字符串非 null 且去空格后非空
-     *   @NotEmpty     字符串/集合非 null 且非空
-     *   @Size(min,max) 长度/大小范围
-     *   @Min/@Max      数值范围
-     *   @Email         邮箱格式
-     *   @Pattern(regexp) 正则匹配
-     *   @Past/@Future  时间在过去/未来
+     * Q4: Jackson 把 isXxx 序列化成了 xxx，怎么办？
+     * A4: Jackson 默认去掉 Boolean 的 is 前缀。用 @JsonProperty("isXxx")
+     *     固定 JSON 字段名，或全局配置 Jackson 命名策略。
      *
-     *   触发方式：@RequestBody 参数前加 @Valid
-     *   失败行为：抛 MethodArgumentNotValidException -> 全局处理器转 400
+     * Q5: 为什么时间字段前端拿到的是数组而不是字符串？
+     * A5: LocalDateTime 默认序列化成数组 [2024,1,15,10,30,0]。
+     *     加 @JsonFormat(pattern="yyyy-MM-dd HH:mm:ss", timezone="GMT+8")
+     *     或全局配置 spring.jackson.date-format + time-zone。
      *
-     *   分组校验：
-     *     定义接口 Create.class / Update.class
-     *     字段注解加 groups = {Create.class}
-     *     @Validated(Create.class) 按组触发
-     *
-     * 二、MapStruct 实体 <-> DTO 映射
-     *   @Mapper 接口声明映射方法，编译期生成实现类（无反射，高性能）
-     *   @Mapping(target="createdAt", ignore=true) 忽略某字段
-     *   @Mapping(source="name", target="username") 字段重命名
-     *   @Mapping(target="fullName", expression="java(user.firstName+' '+user.lastName)") 自定义
-     *
-     *   优势：编译期检查，字段改名后编译报错而非运行时 NPE
-     *   对比 BeanUtils.copyProperties：运行时反射，字段名拼错不报错
+     * Q6: MapStruct 比 BeanUtils.copyProperties 好在哪？
+     * A6: MapStruct 编译期生成映射代码，字段名拼错编译报错，无反射开销；
+     *     BeanUtils 运行时反射，字段名拼错静默失败（不报错但不映射）。
      * =========================================================================
      */
 }

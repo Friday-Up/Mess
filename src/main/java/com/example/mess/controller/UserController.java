@@ -173,72 +173,77 @@ public class UserController {
 
     /*
      * =========================================================================
-     * 【检查清单】Controller 层接口自检表（非可执行代码）
+     * 【面试问答】关于 Controller 与 RESTful 的常见面试题（非可执行代码）
      * =========================================================================
      *
-     * [ ] 路由用复数名词（/api/users），HTTP 动词语义正确
-     * [ ] @RequestBody 参数加 @Valid 触发校验
-     * [ ] 路径参数用 @PathVariable，查询参数用 @RequestParam
-     * [ ] 返回统一 ApiResponse，不返回裸对象
-     * [ ] 不含业务逻辑（Controller 只做协议适配，委派 Service）
-     * [ ] DELETE 操作幂等（删不存在的 id 不报错）
-     * [ ] 接口有文档（Swagger/springdoc 注解或 README）
+     * Q1: @Controller 和 @RestController 的区别？
+     * A1: @RestController = @Controller + @ResponseBody。
+     *     前者返回视图名（HTML 页面），后者返回值直接序列化为 JSON。
      *
-     * 联调排障速查
-     *   现象：POST 返回 403
-     *     -> 检查 Security 配置是否对该路径要求认证/角色
-     *     -> 检查 CSRF 是否启用（本项目已禁用）
+     * Q2: @PathVariable 和 @RequestParam 的区别？
+     * A2: @PathVariable 从 URL 路径中取值（/users/{id} -> id）；
+     *     @RequestParam 从查询串中取值（/users?name=alice -> name）。
      *
-     *   现象：@Valid 没生效，非法参数通过了
-     *     -> 确认参数前写了 @Valid（不是 @Validated，两者有区别）
-     *     -> 确认 DTO 字段上有校验注解（@NotBlank 等）
-     *     -> 确认全局异常处理器捕获了 MethodArgumentNotValidException
+     * Q3: @Valid 加在哪里？不生效怎么办？
+     * A3: 加在 @RequestBody 参数前。不生效检查：
+     *     1) 参数前确实有 @Valid 注解；
+     *     2) DTO 字段上有校验注解（@NotBlank 等）；
+     *     3) 全局异常处理器捕获了 MethodArgumentNotValidException。
      *
-     *   现象：返回的 JSON 字段名和 DTO 属性名对不上
-     *     -> 检查 @JsonProperty 是否指定了别名
-     *     -> 检查 Jackson 配置是否改了命名策略
+     * Q4: RESTful 怎么设计 URL？
+     * A4: 资源用名词复数（/api/users），动作用 HTTP 方法表达。
+     *     GET=/api/users（列表）GET=/api/users/{id}（详情）
+     *     POST=/api/users（创建）PUT=/api/users/{id}（全量更新）
+     *     DELETE=/api/users/{id}（删除）
      *
-     *   现象：中文乱码
-     *     -> 确认 Content-Type: application/json; charset=UTF-8
-     *     -> 确认 HttpMessageConverter 默认字符集为 UTF-8
+     * Q5: POST 和 PUT 的幂等性区别？
+     * A5: PUT 幂等（多次调用结果一致），POST 不幂等（重复提交创建多条）。
+     *     防重复提交：前端按钮禁用 + 后端幂等键/唯一约束。
+     *
+     * Q6: 404 和 403 怎么选？
+     * A6: 资源不存在 -> 404；存在但无权访问 -> 403。
+     *     安全注意：敏感资源不应对无权用户暴露"存在"（403 泄露存在性），
+     *     可考虑统一返回 404。
      * =========================================================================
      */
 
     /*
      * =========================================================================
-     * 【补充手册】RESTful 设计规范与 HTTP 状态码速查（非可执行代码）
+     * 【源码走读】Spring MVC 请求处理流程（非可执行代码）
      * =========================================================================
      *
-     * 一、RESTful 核心原则
-     *   - 资源用名词复数：/api/users、/api/users/{id}
-     *   - 动作用 HTTP 方法表达：GET=查，POST=建，PUT=全量改，PATCH=部分改，DELETE=删
-     *   - 无状态：每个请求自包含认证信息，服务端不存 Session（或用 Token）
-     *   - 分层：客户端不关心后端是单体还是微服务
+     * 一、一次 HTTP 请求的旅程
+     *    1) Tomcat 接收请求，交给 DispatcherServlet
+     *    2) DispatcherServlet 查 HandlerMapping 找到匹配的 Controller 方法
+     *    3) HandlerAdapter 调用 Controller 方法：
+     *       a) 参数解析：@RequestBody -> HttpMessageConverter 反序列化
+     *       b) 校验：@Valid -> Hibernate Validator
+     *       c) 执行方法
+     *       d) 返回值处理：@ResponseBody -> 序列化为 JSON
+     *    4) 如果有异常，交给 HandlerExceptionResolver（@ExceptionHandler）
+     *    5) Response 返回客户端
      *
-     * 二、HTTP 状态码速查
-     *   2xx 成功
-     *     200 OK          查询/更新成功
-     *     201 Created      创建成功（可选：Location 头指向新资源）
-     *     204 No Content   删除成功（无响应体）
+     * 二、@ResponseBody 的作用
+     *    标注后，返回值不走视图解析器（ViewResolver），
+     *    而是交给 HttpMessageConverter（如 MappingJackson2HttpMessageConverter）
+     *    序列化为 JSON 写入响应体。@RestController 已隐含 @ResponseBody。
      *
-     *   4xx 客户端错误
-     *     400 Bad Request         参数格式错误/校验不通过
-     *     401 Unauthorized        未认证（没带 Token 或 Token 无效）
-     *     403 Forbidden           已认证但无权限
-     *     404 Not Found           资源不存在
-     *     405 Method Not Allowed  方法不支持（POST 到只允许 GET 的路由）
-     *     409 Conflict            唯一约束冲突
-     *     429 Too Many Requests   限流触发
+     * 三、@Valid 的触发时机
+     *    在参数解析阶段，HttpMessageConverter 反序列化完请求体后，
+     *    RequestResponseBodyMethodProcessor 检查参数上是否有 @Valid，
+     *    有则调用 validator.validate()，失败抛 MethodArgumentNotValidException。
      *
-     *   5xx 服务端错误
-     *     500 Internal Error  未捕获异常（兜底）
-     *     502 Bad Gateway     下游服务不可用
-     *     503 Service Unavailable  熔断/维护中
+     * 四、全局异常处理器的接入点
+     *    ExceptionHandlerExceptionResolver 遍历所有 @ControllerAdvice 类，
+     *    找到匹配异常类型的 @ExceptionHandler 方法执行。
+     *    匹配逻辑：异常类型继承距离最近的优先。
      *
-     * 三、幂等性
-     *   GET/PUT/DELETE 天然幂等（多次执行结果一致）
-     *   POST 不幂等（重复提交会创建多条）
-     *   防重复提交：前端按钮禁用 + 后端幂等键/唯一约束
+     * 五、拦截器 vs 过滤器
+     *    Filter（过滤器）：Servlet 容器层，在 DispatcherServlet 前后执行，
+     *      可改请求/响应对象，Spring MVC 之外也生效。
+     *    Interceptor（拦截器）：Spring MVC 层，在 Handler 执行前后执行，
+     *      可访问 HandlerMethod，但拿不到原始请求体（已被读取）。
+     *    Security 过滤器链是 Filter 层，@ControllerAdvice 是 MVC 层。
      * =========================================================================
      */
 }

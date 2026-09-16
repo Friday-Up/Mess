@@ -177,30 +177,35 @@ class HelloControllerTest {
 
     /*
      * =========================================================================
-     * 【检查清单】序列化与断言自检表（非可执行代码）
+     * 【面试问答】关于序列化与断言的常见面试题（非可执行代码）
      * =========================================================================
      *
-     * [ ] 断言信息可读（assertEquals("expected", actual) 而非 assertTrue(actual.equals("expected"))）
-     * [ ] 时间断言考虑时区（CI 可能用 UTC）
-     * [ ] 共享 ObjectMapper（不要每个测试 new 一个）
-     * [ ] 泛型反序列化用 TypeReference / constructParametricType
-     * [ ] 不用 Thread.sleep 等异步（用 Awaitility 或 CountDownLatch）
+     * Q1: 泛型反序列化 data 变成 LinkedHashMap 怎么办？
+     * A1: 泛型擦除导致 Jackson 不知道 data 的目标类型。
+     *     用 TypeReference<ApiResponse<String>>{} 或
+     *     TypeFactory.constructParametricType(ApiResponse.class, String.class)
+     *     显式告知。本类测试中用的就是后者。
      *
-     * 序列化排障速查
-     *   现象：泛型类型擦除，data 变成 LinkedHashMap
-     *     -> 用 TypeFactory.constructParametricType(ApiResponse.class, UserDto.class)
-     *     -> 或用 new TypeReference<ApiResponse<UserDto>>(){}
+     * Q2: assertEquals 和 assertTrue 怎么选？
+     * A2: 优先 assertEquals(expected, actual)，失败信息清晰（显示两边值）。
+     *     assertTrue(actual.equals(expected)) 失败时只有 false，无值对比。
      *
-     *   现象：日期字段反序列化失败
-     *     -> 加 @JsonFormat(pattern="yyyy-MM-dd HH:mm:ss", timezone="GMT+8")
-     *     -> 或全局配置 spring.jackson.date-format + time-zone
+     * Q3: 时间断言在 CI 上失败怎么排查？
+     * A3: CI 可能用 UTC 而本地用 GMT+8。统一在测试中指定时区，
+     *     或用 Instant（UTC 统一）而非 LocalDateTime 断言。
      *
-     *   现象：Boolean 字段名 isXxx 序列化后变成 xxx
-     *     -> Jackson 默认把 is 前缀去掉，用 @JsonProperty("isXxx") 固定
+     * Q4: ObjectMapper 要每次 new 吗？
+     * A4: 不要。ObjectMapper 是线程安全的重量级对象，应复用。
+     *     每次测试 new 一个会拖慢测试。可用 @BeforeAll 创建静态实例。
      *
-     *   现象：null 字段出现在 JSON 中
-     *     -> 加 @JsonInclude(JsonInclude.Include.NON_NULL)
-     *     -> 或全局配置 spring.jackson.default-property-inclusion=non_null
+     * Q5: null 字段出现在 JSON 中怎么办？
+     * A5: 加 @JsonInclude(JsonInclude.Include.NON_NULL) 在类或字段上，
+     *     或全局配置 spring.jackson.default-property-inclusion=non_null。
+     *
+     * Q6: 为什么不用 Thread.sleep 做异步测试？
+     * A6: Thread.sleep 不可靠（快环境浪费等待，慢环境不够等待）。
+     *     用 Awaitility（await().atMost(5,SECONDS).until()）或
+     *     CountDownLatch 做确定性等待。
      * =========================================================================
      */
 }
