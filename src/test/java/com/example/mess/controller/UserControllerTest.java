@@ -219,43 +219,67 @@ class UserControllerTest {
     }
 
     /*
-     * ============================================================================
-     * 【阅读笔记】MockMvc 与 jsonPath 速查（非可执行代码）
-     * ============================================================================
+     * =========================================================================
+     * 【检查清单】MockMvc 测试自检表（非可执行代码）
+     * =========================================================================
      *
-     * 一、两种 MockMvc 构建方式对比
-     * ----------------------------------------------------------------------------
-     *   standaloneSetup(controller)
-     *       —— 只装该 Controller，不加载过滤链/拦截器/异常处理;
-     *       快，轻，适合纯"Controller 单测";
-     *       不能测认证/全局异常的行为，需要配合 @InjectMocks。
-     *   @WebMvcTest(UserController.class) + MockMvc
-     *       —— Spring Boot 提供的 Web 切片，加载默认配置、
-     *          JsonMapper、全局异常处理器等多种基础设施;
-     *       @MockBean 替换容器中的服务，更接近真实段段调用。
+     * [ ] 请求路径和 HTTP 方法与 Controller 定义一致
+     * [ ] Content-Type 设为 application/json（POST/PUT 带 body 时）
+     * [ ] 断言状态码 + JSON 结构（jsonPath）
+     * [ ] jsonPath 的 data 字段类型断言明确（is() 而非空判断）
+     * [ ] verify 确认 Service 被调用了正确次数
+     * [ ] standaloneSetup 与 @WebMvcTest 不要混用（各有适用场景）
      *
-     * 二、请求构建 API
-     * ----------------------------------------------------------------------------
-     *   mockMvc.perform(get("/api/users/1"))  // 还有 post/put/delete
-     *          .contentType(MediaType.APPLICATION_JSON)
-     *          .content("{\"username\":\"a\"}")
-     *          .header("Authorization", "Bearer xxx")
-     *          .param("page", "0")
-     *          .andExpect(...).andReturn();
+     * MockMvc 排障速查
+     *   现象：jsonPath 断言失败
+     *     -> 打印响应看实际 JSON：.andDo(print())
+     *     -> 检查路径是否正确（$.data vs $.data[0] vs $.data.content）
      *
-     * 三、常用断言链
-     * ----------------------------------------------------------------------------
-     *   .andExpect(status().isOk()).andExpect(status().isCreated());
-     *   .andExpect(jsonPath("$.code").value(200));
-     *   .andExpect(jsonPath("$.data", hasSize(3)));
-     *   .andExpect(jsonPath("$.data[0].username", is("alice")));
-     *   JsonPath 支持过滤（$.data[?(@.id==1)]）与取长度，功能比基础断言强。
+     *   现象：standaloneSetup 下异常不被全局处理器拦截
+     *     -> standaloneSetup 不加载 @ControllerAdvice，需要 .setControllerAdvice()
+     *     -> 或改用 @WebMvcTest（自动加载全局异常处理器）
      *
-     * 四、与集成测试的分工
-     * ----------------------------------------------------------------------------
-     *   本类：Controller 层单测，内存运行，每次 CI 都跑;
-     *   选 Service 单测：只测业务决策与依赖调用;
-     *   选 @SpringBootTest 集成：覆盖仓库/事务/序列化全链，只挑关键用例。
-     * ============================================================================
+     *   现象：@WebMvcTest 注入 Service 失败
+     *     -> @WebMvcTest 只装 Web 层，Service 需用 @MockBean 替换
+     *     -> 检查 @MockBean 的类型是否与 @Autowired 参数类型匹配
+     *
+     *   现象：CSRF 导致 POST 返回 403
+     *     -> @WebMvcTest 可能加载 SecurityFilterChain
+     *     -> 测试中用 .with(csrf()) 补 CSRF Token
+     * =========================================================================
+     */
+
+    /*
+     * =========================================================================
+     * 【补充手册】测试金字塔与 CI 集成速查（非可执行代码）
+     * =========================================================================
+     *
+     * 一、测试金字塔
+     *   底层：单元测试（70%）—— Mockito mock 依赖，不启动容器，毫秒级
+     *   中层：切片测试（20%）—— @WebMvcTest/@DataJpaTest，部分启动，秒级
+     *   顶层：集成测试（10%）—— @SpringBootTest 全量启动，十秒级
+     *
+     *   原则：底层最多最快，顶层最少最慢，形成稳定的金字塔
+     *   反模式：倒金字塔（只有集成测试）-> CI 慢、定位问题难
+     *
+     * 二、测试命名约定
+     *   方法名：methodName_scenario_expectedResult
+     *   例：createUser_validInput_returnsCreatedUser
+     *       getUser_nonexistentId_throwsNotFound
+     *   好处：测试报告自解释，不看代码就知道测了什么
+     *
+     * 三、CI 集成要点
+     *   - mvn test 跑所有测试，mvn -Dtest=ClassName 只跑指定类
+     *   - mvn -Dgroups=unit 跑分组测试（需 JUnit5 @Tag 标注）
+     *   - 测试失败的 CI 应阻断合并，不能忽略
+     *   - 测试覆盖率作为参考指标，不作为唯一质量门禁
+     *   - 历史遗留测试编译失败时可用 -Dmaven.test.skip=true 临时跳过
+     *     但应尽快修复，不要长期跳过
+     *
+     * 四、测试数据管理
+     *   - 小项目：测试方法内自建数据，互不依赖
+     *   - 中项目：@BeforeEach 初始化 + @Transactional @Rollback 回滚
+     *   - 大项目：data.sql / Flyway 测试脚本 + Testcontainers 真实数据库
+     * =========================================================================
      */
 }

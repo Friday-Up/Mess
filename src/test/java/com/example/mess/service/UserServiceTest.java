@@ -193,39 +193,33 @@ class UserServiceTest {
     }
 
     /*
-     * ============================================================================
-     * 【阅读笔记】Mockito 常用 API 速查（非可执行代码）
-     * ============================================================================
+     * =========================================================================
+     * 【检查清单】Mockito 单元测试自检表（非可执行代码）
+     * =========================================================================
      *
-     * 一、打桩（stubbing）
-     * ----------------------------------------------------------------------------
-     *   when(repo.findById(1L)).thenReturn(Optional.of(user));
-     *   when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
-     *   when(repo.save(any())).thenThrow(new RuntimeException("boom"));
-     *   doNothing().when(repo).deleteById(1L);   // void 方法专用写法
-     *   thenReturn > thenAnswer 优先，只有生成逻辑复杂时才用 Answer。
+     * [ ] 每个 @Test 只验证一个行为（命名：方法_场景_期望结果）
+     * [ ] Arrange/Act/Assert 三段式，阅读即知意图
+     * [ ] @BeforeEach 只放公共 mock 初始化，不在测试间共享可变状态
+     * [ ] verify 精确到 times(n)，不写无 times 的 verify（等于 times(1) 容易遗漏）
+     * [ ] verifyNoMoreInteractions 放最后，确保没有意外调用
+     * [ ] 不 mock 返回值又给返回值本身打桩（等于测 mock 而非业务逻辑）
      *
-     * 二、校验（verification）
-     * ----------------------------------------------------------------------------
-     *   verify(repo).save(any());                    // 默认 times(1)
-     *   verify(repo, times(2)).findAll();
-     *   verify(repo, never()).delete(any());
-     *   verifyNoMoreInteractions(repo);              // 严格模式，防多调用
-     *   InOrder inOrder = inOrder(a, b);             // 校验调用顺序
+     * Mockito 排障速查
+     *   现象：when().thenReturn() 不生效
+     *     -> 检查 mock 对象是否是 @Mock 注入的，而非 new 出来的
+     *     -> 检查 @InjectMocks 是否正确装配了 @Mock 依赖
      *
-     * 三、参数捕获
-     * ----------------------------------------------------------------------------
-     *   ArgumentCaptor<User> captor = ArgumentCaptor.forClass(User.class);
-     *   verify(repo).save(captor.capture());
-     *   assertEquals("alice", captor.getValue().getUsername());
-     *   适合断言"传给依赖的对象被正确组装"，比 any() 更精细。
+     *   现象：verify 报 "Actually, zero interactions"
+     *     -> 方法逻辑走了另一条分支没调到 mock
+     *     -> mock 参数匹配器不对（any() vs 具体值）
      *
-     * 四、基本行为准则
-     * ----------------------------------------------------------------------------
-     *   - 一个测试只测一个行为，命名用"方法_场景_期望结果";
-     *   - @BeforeEach 里尽量只放公共 mock 初始化，不要在之间共享状态;
-     *   - 保持 Arrange/Act/Assert 三段式，阅读立见不混乱;
-     *   - 不要 mock 返回值再给返回值本身打桩——mock 太多导致测试贴代码。
-     * ============================================================================
+     *   现象：ArgumentCaptor 捕获的值不对
+     *     -> capture() 在 verify 中调用，取值用 getValue()/getAllValues()
+     *     -> 若方法被调多次，getValue() 返回最后一次
+     *
+     *   现象：测试通过但实际运行出错
+     *     -> mock 太多，业务逻辑被架空（"测试只验证了 mock"）
+     *     -> 该用真实依赖的地方用了 mock（如序列化/数据库交互）
+     * =========================================================================
      */
 }

@@ -176,35 +176,31 @@ class HelloControllerTest {
     }
 
     /*
-     * ============================================================================
-     * 【阅读笔记】序列化与反序列化测试技巧（非可执行代码）
-     * ============================================================================
+     * =========================================================================
+     * 【检查清单】序列化与断言自检表（非可执行代码）
+     * =========================================================================
      *
-     * 一、单元测试 vs 集成测试的取舍
-     * ----------------------------------------------------------------------------
-     *   本类只做 Controller 层的表现验证，不涉及真实序列化，
-     *   保证"请求路由+参数绑定+响应结构"正确即可。
-     *   验证 JSON 结构要用 @JsonTest 或在测试中通过 ObjectMapper 序列化。
+     * [ ] 断言信息可读（assertEquals("expected", actual) 而非 assertTrue(actual.equals("expected"))）
+     * [ ] 时间断言考虑时区（CI 可能用 UTC）
+     * [ ] 共享 ObjectMapper（不要每个测试 new 一个）
+     * [ ] 泛型反序列化用 TypeReference / constructParametricType
+     * [ ] 不用 Thread.sleep 等异步（用 Awaitility 或 CountDownLatch）
      *
-     * 二、范型返回值的常见坑
-     * ----------------------------------------------------------------------------
-     *   若直接在 RestTemplate/WebClient 层拿 ApiResponse<T>，会遭遇泛型擦除——
-     *   T 被还原成 LinkedHashMap，字段访问会 出现 ClassCastException。
-     *   解决方案：
-     *     - 用 ParameterizedTypeReference / TypeFactory 指定泛型类型;
-     *     - 或者封装一个辅助方法 decode(ApiResponse.class, UserDto.class)。
+     * 序列化排障速查
+     *   现象：泛型类型擦除，data 变成 LinkedHashMap
+     *     -> 用 TypeFactory.constructParametricType(ApiResponse.class, UserDto.class)
+     *     -> 或用 new TypeReference<ApiResponse<UserDto>>(){}
      *
-     * 三、ObjectMapper 在测试中的最佳实践
-     * ----------------------------------------------------------------------------
-     *   - 共享同一个 ObjectMapper 实例，而不是每个测试新建（昂贵）;
-     *   - 使用 @JsonTest 的 JacksonTester<UserDto> 可以快速序列化/反序列化;
-     *   - 业务上有自定义 Module 时，测试中要用同一套配置，避免"造假"通过。
+     *   现象：日期字段反序列化失败
+     *     -> 加 @JsonFormat(pattern="yyyy-MM-dd HH:mm:ss", timezone="GMT+8")
+     *     -> 或全局配置 spring.jackson.date-format + time-zone
      *
-     * 四、字符集与时间格式
-     * ----------------------------------------------------------------------------
-     *   - 时间字段：在测试预期中明确时区（GMT+8）与格式，防止 CI 环境默认值不同;
-     *   - 中文/特殊字符：利用 UTF-8 编码，在请求与响应 Content-Type 中声明;
-     *   - 数字与布尔：JSON 中 1/0 不等于 true/false，在序列化断言时要写明类型。
-     * ============================================================================
+     *   现象：Boolean 字段名 isXxx 序列化后变成 xxx
+     *     -> Jackson 默认把 is 前缀去掉，用 @JsonProperty("isXxx") 固定
+     *
+     *   现象：null 字段出现在 JSON 中
+     *     -> 加 @JsonInclude(JsonInclude.Include.NON_NULL)
+     *     -> 或全局配置 spring.jackson.default-property-inclusion=non_null
+     * =========================================================================
      */
 }
