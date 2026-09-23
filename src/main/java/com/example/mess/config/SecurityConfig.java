@@ -143,77 +143,60 @@ public class SecurityConfig {
 
     /*
      * =========================================================================
-     * 【面试问答】关于 Spring Security 的常见面试题（非可执行代码）
+     * 【ADR-009】认证方案选择策略
      * =========================================================================
+     * 上下文：项目需要认证机制保护接口，可选 Session+Cookie、JWT Token、
+     *         OAuth2 等方案。当前是开发/演示阶段，先用内存用户快速验证。
+     * 决策：开发阶段用 InMemoryUserDetailsManager + BCryptPasswordEncoder，
+     *       禁用 CSRF（因为走 Token 认证路线），生产阶段迁移到数据库用户 + JWT。
+     * 替代方案：
+     *   A) Session+Cookie —— 有状态，不适合微服务和前后端分离。
+     *   B) 直接上 JWT —— 开发阶段配置复杂，拖慢初期进度。
+     *   C) 不做认证 —— 接口裸奔，安全风险极高。
+     * 后果：开发阶段快速可用；生产迁移需：1) 实现 UserDetailsService 查数据库；
+     *       2) 加 JWT Filter；3) sessionCreationPolicy(STATELESS)；
+     *       4) CORS 显式配置；5) 安全响应头加固。
      *
-     * Q1: Spring Security 的核心是什么？
-     * A1: SecurityFilterChain —— 一条过滤器链，每个过滤器负责一个环节：
-     *     认证 -> 授权 -> CSRF -> Session -> 异常转换。请求穿过整条链。
-     *
-     * Q2: CSRF 什么时候可以禁用？
-     * A2: CSRF 只对"浏览器 Cookie 认证"有效。若用 Token/Header 认证
-     *     （无 Cookie），可以安全禁用。若有浏览器 Cookie 认证则需启用，
-     *     前端从 Cookie 读 CSRF Token 放入请求头。
-     *
-     * Q3: 为什么密码要用 BCrypt 而不用 MD5？
-     * A3: MD5 可被彩虹表秒破。BCrypt 内置随机盐 + 可调计算代价（cost factor），
-     *     每次哈希结果不同，抗暴力破解。Spring 用 BCryptPasswordEncoder。
-     *
-     * Q4: hasRole("ADMIN") 和 hasAuthority("ADMIN") 的区别？
-     * A4: hasRole 自动加 ROLE_ 前缀，实际匹配 ROLE_ADMIN；
-     *     hasAuthority 精确匹配，不加前缀。
-     *     UserDetails 中角色需以 "ROLE_" 开头才能用 hasRole。
-     *
-     * Q5: Security 的 401/403 不经过 @RestControllerAdvice 怎么处理？
-     * A5: Security 过滤器链中的异常不走 Controller 层的全局处理器。
-     *     需单独配置 AuthenticationEntryPoint（401）和
-     *     AccessDeniedHandler（403），返回统一 ApiResponse 格式。
-     *
-     * Q6: 生产环境怎么从内存用户迁移到数据库？
-     * A6: 实现 UserDetailsService.loadUserByUsername()，
-     *     查数据库返回 UserDetails。替换 InMemoryUserDetailsManager。
-     *     密码字段用 BCrypt 加密存储。
+     * =========================================================================
+     * 【代码审查要点】安全配置
+     * =========================================================================
+     * [ ] 生产环境不用 InMemoryUserDetailsManager，改数据库 UserDetailsService
+     * [ ] 密码用 BCryptPasswordEncoder 或更强算法，不明文存储
+     * [ ] 授权规则先精确后宽泛（anyRequest 放最后）
+     * [ ] CORS 显式配置允许来源，不用 *
+     * [ ] 敏感接口有权限要求（不是 permitAll）
+     * [ ] 认证失败返回 401，权限不足返回 403
+     * [ ] CSRF 策略明确：Token 认证可禁用，Cookie 认证需启用
+     * [ ] 用户/密钥不放代码中，用环境变量或密钥管理服务
+     * [ ] Security 的 401/403 需单独配置 AuthenticationEntryPoint/AccessDeniedHandler
      * =========================================================================
      */
 
     /*
      * =========================================================================
-     * 【源码走读】Security 过滤器链与认证流程（非可执行代码）
+     * 【ADR-009-S】密码存储演进策略（补充）
      * =========================================================================
+     * 上下文：密码存储方案直接影响用户数据安全，需选择抗破解的算法。
+     * 决策：使用 BCryptPasswordEncoder，内置随机盐 + 可调计算代价（cost factor），
+     *       抗暴力破解和彩虹表攻击。
+     * 替代方案：
+     *   A) 明文存储 —— 数据库泄露即全部裸奔，不可接受。
+     *   B) MD5/SHA1 哈希 —— 可被彩虹表秒破，已不安全。
+     *   C) 加盐 SHA256 —— 比上一代好，但 GPU 暴力破解仍可行。
+     *   D) Argon2 —— 比 BCrypt 更新更强，但 Spring 内建支持不如 BCrypt 完善。
+     * 后果：BCrypt 是 Spring Security 默认推荐，生态支持好；
+     *       cost factor >= 10 可调，硬件升级后可提高代价保持安全性。
      *
-     * 一、过滤器链的顺序（简化版）
-     *    SecurityContextPersistenceFilter  —— 从 Session 恢复 SecurityContext
-     *    UsernamePasswordAuthenticationFilter —— 处理表单登录认证
-     *    BasicAuthenticationFilter        —— 处理 HTTP Basic 认证
-     *    ExceptionTranslationFilter       —— 翻译认证/授权异常为 401/403
-     *    FilterSecurityInterceptor        —— 最终授权决策
-     *    请求穿过整条链，任一环节拦截即返回，不进入 Controller。
-     *
-     * 二、认证流程（表单登录为例）
-     *    1) 请求到达 UsernamePasswordAuthenticationFilter
-     *    2) 封装为 UsernamePasswordAuthenticationToken（未认证）
-     *    3) 交给 AuthenticationManager -> AuthenticationProvider
-     *    4) Provider 调 UserDetailsService.loadUserByUsername() 查用户
-     *    5) PasswordEncoder.matches() 校验密码
-     *    6) 成功 -> 创建已认证 Token 存入 SecurityContext
-     *    7) 失败 -> 抛 AuthenticationException -> 401
-     *
-     * 三、授权流程
-     *    FilterSecurityInterceptor 在 Controller 执行前做最终检查：
-     *    1) 读取 SecurityContext 中的 Authentication
-     *    2) 根据 @PreAuthorize 或 hasRole/hasAuthority 规则判断
-     *    3) 通过 -> 放行；不通过 -> 抛 AccessDeniedException -> 403
-     *
-     * 四、Session vs Token
-     *    Session：认证后存 Session，后续请求靠 Cookie 关联。有状态。
-     *    Token（JWT）：认证后返回 Token，后续请求 Header 携带。无状态。
-     *    无状态用 sessionCreationPolicy(STATELESS) + JWT Filter 替换表单登录。
-     *
-     * 五、Security 的 401/403 为什么不经过 @RestControllerAdvice
-     *    Security 异常在 Filter 层抛出，此时还没进入 DispatcherServlet，
-     *    @ControllerAdvice 是 MVC 层机制，拦截不到。
-     *    需要 AuthenticationEntryPoint（401）和 AccessDeniedHandler（403）
-     *    在 Security 配置中手动指定，返回统一 ApiResponse 格式。
+     * 生产迁移清单：
+     *   [ ] InMemoryUserDetailsManager -> 自定义 UserDetailsService（查数据库）
+     *   [ ] 密码编码器确认 BCryptPasswordEncoder
+     *   [ ] 认证从 Session+Cookie 改为 JWT 或 OAuth2（无状态）
+     *   [ ] sessionCreationPolicy(STATELESS) 关闭 Session
+     *   [ ] CORS 显式配置允许来源（不用 *）
+     *   [ ] 安全响应头：X-Content-Type-Options, X-Frame-Options,
+     *       Content-Security-Policy, Strict-Transport-Security
+     *   [ ] 登录失败锁定策略（连续 N 次失败临时锁定）
+     *   [ ] 审计日志：记录登录成功/失败、敏感操作
      * =========================================================================
      */
 }

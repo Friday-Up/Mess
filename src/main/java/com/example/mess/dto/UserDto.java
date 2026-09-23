@@ -123,34 +123,62 @@ public class UserDto {
 
     /*
      * =========================================================================
-     * 【面试问答】关于 DTO 的常见面试题（非可执行代码）
+     * 【ADR-003】DTO 字段筛选与序列化策略
      * =========================================================================
+     * 上下文：DTO 是接口契约的载体，需裁剪敏感字段、格式化时间、控制 null 输出。
+     * 决策：DTO 只包含前端需要的字段，时间字段用 @JsonFormat 格式化，
+     *       null 字段用 @JsonInclude(NON_NULL) 过滤，输入校验用 @Valid + 注解。
+     * 替代方案：
+     *   A) 实体加 @JsonIgnore 隐藏字段 —— 每次加字段都要记得加注解，易遗漏。
+     *   B) 用 Map 结构返回 —— 无类型安全，前端不知道有哪些字段。
+     *   C) 用 GraphQL —— 按需查询字段，但引入新框架复杂度高。
+     * 后果：DTO 与实体一对一对应，新增表字段不会自动暴露；前端拿到的 JSON
+     *       结构稳定，时间格式统一，null 字段不出现。
      *
-     * Q1: 为什么需要 DTO？直接返回实体不行吗？
-     * A1: DTO 解耦接口与表结构、裁剪敏感字段、承载校验注解、组合多源数据。
-     *     直接返回实体会泄露内部字段、触发懒加载异常、接口与数据库强耦合。
+     * =========================================================================
+     * 【代码审查要点】DTO
+     * =========================================================================
+     * [ ] DTO 不含 password/token 等敏感字段
+     * [ ] 时间字段有 @JsonFormat(pattern, timezone)
+     * [ ] 输入 DTO 有校验注解（@NotBlank/@Email/@Size），Controller 参数有 @Valid
+     * [ ] 输出 DTO 加 @JsonInclude(NON_NULL) 减小报文
+     * [ ] Boolean 字段名不以 is 开头（Jackson 会去掉 is 前缀导致前端字段名不一致）
+     * [ ] 枚举字段用 String 或 int，序列化稳定且向前兼容
+     * [ ] DTO 命名区分场景：XxxCreateDto/XxxUpdateDto/XxxVo（大项目）或统一 XxxDto（小项目）
+     * [ ] 新增实体字段后，DTO 不会自动包含（需手动添加，防止泄露）
+     * =========================================================================
+     */
+
+    /*
+     * =========================================================================
+     * 【ADR-003-S】校验注解与 MapStruct 映射策略（补充）
+     * =========================================================================
+     * 上下文：输入 DTO 需要校验，实体与 DTO 之间的转换需要高效可靠。
+     * 决策：输入校验用 Hibernate Validator 注解 + @Valid 触发；
+     *       实体-DTO 转换当前手写，后续字段增多时引入 MapStruct。
+     * 替代方案：
+     *   A) BeanUtils.copyProperties —— 运行时反射，字段名拼错不报错。
+     *   B) 手动 new + setter —— 可控但字段多时繁琐。
+     *   C) ModelMapper —— 反射映射，性能不如 MapStruct。
+     * 后果：MapStruct 编译期生成映射代码，字段名拼错编译报错，无反射开销；
+     *       当前手写转换保证透明可控。
      *
-     * Q2: DTO 和 VO 有什么区别？
-     * A2: 严格区分时：DTO 侧重传输（可入可出），VO 侧重展示（只读）。
-     *     小项目通常混用不细分，大项目按场景拆：CreateDto/UpdateDto/QueryVo。
+     * Hibernate Validator 常用注解速查：
+     *   @NotNull      不为 null（允许空字符串）
+     *   @NotBlank     字符串非 null 且去空格后非空
+     *   @NotEmpty     字符串/集合非 null 且非空
+     *   @Size(min,max) 长度/大小范围
+     *   @Min/@Max      数值范围
+     *   @Email         邮箱格式
+     *   @Pattern(regexp) 正则匹配
+     *   @Past/@Future  时间在过去/未来
+     *   触发：@RequestBody 参数前加 @Valid
+     *   失败：抛 MethodArgumentNotValidException -> 全局处理器转 400
      *
-     * Q3: @Valid 和 @Validated 的区别？
-     * A3: @Valid 是 JSR 标准，支持嵌套校验但不支持分组；
-     *     @Validated 是 Spring 扩展，支持分组校验（groups）。
-     *     方法参数上用 @Valid 触发校验，需要分组时改用 @Validated(Group.class)。
-     *
-     * Q4: Jackson 把 isXxx 序列化成了 xxx，怎么办？
-     * A4: Jackson 默认去掉 Boolean 的 is 前缀。用 @JsonProperty("isXxx")
-     *     固定 JSON 字段名，或全局配置 Jackson 命名策略。
-     *
-     * Q5: 为什么时间字段前端拿到的是数组而不是字符串？
-     * A5: LocalDateTime 默认序列化成数组 [2024,1,15,10,30,0]。
-     *     加 @JsonFormat(pattern="yyyy-MM-dd HH:mm:ss", timezone="GMT+8")
-     *     或全局配置 spring.jackson.date-format + time-zone。
-     *
-     * Q6: MapStruct 比 BeanUtils.copyProperties 好在哪？
-     * A6: MapStruct 编译期生成映射代码，字段名拼错编译报错，无反射开销；
-     *     BeanUtils 运行时反射，字段名拼错静默失败（不报错但不映射）。
+     * 分组校验：
+     *   定义接口 Create.class / Update.class
+     *   字段注解加 groups = {Create.class}
+     *   @Validated(Create.class) 按组触发
      * =========================================================================
      */
 }

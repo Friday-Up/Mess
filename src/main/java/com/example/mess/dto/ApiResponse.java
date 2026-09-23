@@ -205,72 +205,62 @@ public class ApiResponse<T> {
 
     /*
      * =========================================================================
-     * 【面试问答】关于统一响应的常见面试题（非可执行代码）
+     * 【ADR-004】统一响应封装策略
      * =========================================================================
+     * 上下文：前后端协作需要统一的响应结构，否则每个接口返回格式不一致，
+     *         前端需要逐个适配，联调成本高，监控无法统一处理。
+     * 决策：所有接口返回 ApiResponse<T>，包含 code/message/data/path 四个字段。
+     *       成功用静态工厂 success()，失败用 error()，全局异常处理器也返回 ApiResponse。
+     * 替代方案：
+     *   A) Controller 有时返回 ApiResponse 有时返回裸对象 —— 前端需多分支判断。
+     *   B) 用 ResponseBodyAdvice 自动包装 —— Controller 更干净，但"偷偷改写"
+     *      返回值对新人不透明，String 类型需特殊处理。
+     *   C) 不封装，前端自己处理 —— 联调成本极高，无法统一错误处理。
+     * 后果：前端在统一拦截器中判断 code 处理成功/失败；5xx 不透出堆栈；
+     *       但每次 Controller 需手写 ApiResponse.success()，略显冗余。
      *
-     * Q1: 为什么要统一响应结构？
-     * A1: 前端在统一拦截器中处理成功/失败，减少重复逻辑；
-     *     后端所有接口遵循同一契约，文档和联调成本降低；
-     *     监控/网关能基于 code 做统一的告警和限流。
-     *
-     * Q2: code 应该和 HTTP 状态码一致还是自定义业务码？
-     * A2: 推荐对齐 HTTP 状态码（200/400/404/500），降低前端记忆成本。
-     *     如需业务细分，在不冲突的前提下扩展区间（如 40001=参数缺失），
-     *     但 HTTP 状态仍要正确（4xx/5xx），否则监控/网关识别不了。
-     *
-     * Q3: 为什么 5xx 不把堆栈给前端？
-     * A3: 堆栈暴露技术栈、表名、包路径，是安全漏洞。
-     *     正确做法：日志里记完整堆栈（ERROR 级），响应只给通用提示。
-     *
-     * Q4: 泛型反序列化时 data 变成 LinkedHashMap 怎么办？
-     * A4: 泛型擦除导致 Jackson 不知道 data 的目标类型。
-     *     用 TypeReference<ApiResponse<UserDto>>{} 或
-     *     TypeFactory.constructParametricType(ApiResponse.class, UserDto.class)
-     *     显式告知类型。
-     *
-     * Q5: 如何避免每个 Controller 手写 ApiResponse.success()？
-     * A5: 实现 ResponseBodyAdvice<Object>，在响应写出前自动包装：
-     *     已是 ApiResponse 则放行，否则包一层。
-     *     注意 String 返回类型要单独处理（Converter 冲突）。
-     *
-     * Q6: 失败时 data 设为 null 还是省略字段？
-     * A6: 设为 null，保持 JSON 结构稳定。前端不用判断字段是否存在，
-     *     加 @JsonInclude(NON_NULL) 可让 null 字段不出现在 JSON 中。
+     * =========================================================================
+     * 【代码审查要点】统一响应
+     * =========================================================================
+     * [ ] 所有 Controller 返回 ApiResponse，无裸对象/裸 Map
+     * [ ] 全局异常处理器也返回 ApiResponse（与正常路径结构一致）
+     * [ ] 成功 code=200，失败 code 对应 HTTP 语义
+     * [ ] data 为 null 时 JSON 仍保留该字段（结构稳定）
+     * [ ] 5xx 异常不透出堆栈给客户端
+     * [ ] message 面向用户可读，不含技术细节（表名/SQL/包名）
+     * [ ] path 记录请求路径，便于日志关联
+     * [ ] 泛型反序列化用 TypeReference 或 constructParametricType（避免擦除变 LinkedHashMap）
      * =========================================================================
      */
 
     /*
      * =========================================================================
-     * 【源码走读】Jackson 序列化流程（非可执行代码）
+     * 【ADR-004-S】自动化封装与前端对接策略（补充）
      * =========================================================================
+     * 上下文：每个 Controller 手写 ApiResponse.success() 略显冗余，
+     *         可用 ResponseBodyAdvice 自动包装。
+     * 决策：当前项目规模小，手写封装更透明，不引入 ResponseBodyAdvice。
+     *       后续接口增多时可考虑自动化封装。
+     * 替代方案：
+     *   A) ResponseBodyAdvice 自动包装 —— Controller 更干净，但"偷偷改写"
+     *      返回值对新人不透明，String 类型需特殊处理。
+     *   B) AOP 切面包装 —— 与 ResponseBodyAdvice 类似，更灵活但也更复杂。
+     *   C) 不封装，前端自己处理 —— 联调成本极高。
+     * 后果：当前手写封装透明可控；后续可平滑迁移到 ResponseBodyAdvice。
      *
-     * 一、Spring MVC 何时触发序列化
-     *    Controller 方法返回后，如果标注了 @ResponseBody（或 @RestController），
-     *    RequestResponseBodyMethodProcessor 负责处理返回值：
-     *    1) 根据 Content-Type 选 HttpMessageConverter（如 JSON）
-     *    2) MappingJackson2HttpMessageConverter 调用 ObjectMapper.writeValue()
-     *    3) ObjectMapper 通过反射遍历字段 getter，生成 JSON
-     *    4) 写入 HTTP 响应体
+     * 前端消费约定：
+     *   响应拦截器统一判断 code：
+     *     code === 200 -> 取 data 放行
+     *     code === 401 -> 跳登录页
+     *     code === 403 -> 跳无权限页
+     *     code >= 500  -> 兜底提示 + 上报监控
+     *     其他         -> 弹 message 提示业务错误
+     *   分页数据结构约定：data = { list, total, page, size }
      *
-     * 二、Jackson 注解的生效时机
-     *    @JsonIgnore       序列化和反序列化都跳过该字段
-     *    @JsonProperty     指定 JSON 键名（序列化和反序列化都生效）
-     *    @JsonFormat       序列化时格式化日期
-     *    @JsonInclude      控制字段是否出现在 JSON 中（如 NON_NULL）
-     *    这些注解在 ObjectMapper 遍历字段时被读取并应用。
-     *
-     * 三、反序列化的类型推断
-     *    ObjectMapper.readValue(json, ApiResponse.class) 时，
-     *    T 的类型已被擦除，data 字段被解析为 LinkedHashMap。
-     *    需要 constructParametricType 或 TypeReference 保留泛型信息，
-     *    Jackson 才能正确实例化 data 的目标类型。
-     *
-     * 四、Spring Boot 的自动配置
-     *    JacksonAutoConfiguration 自动注册 ObjectMapper Bean，
-     *    可通过 application.yml 调整：
-     *    spring.jackson.date-format=yyyy-MM-dd HH:mm:ss
-     *    spring.jackson.time-zone=GMT+8
-     *    spring.jackson.default-property-inclusion=non_null
+     * 常见反模式：
+     *   - Controller 有时返回 ApiResponse 有时返回 String -> 前端需多分支判断
+     *   - 5xx 异常把 e.getMessage() 给前端 -> 泄露内部实现
+     *   - 所有错误都返回 code=200 + message="操作失败" -> 监控无法识别真实故障
      * =========================================================================
      */
 }

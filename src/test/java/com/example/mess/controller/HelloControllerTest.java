@@ -177,35 +177,30 @@ class HelloControllerTest {
 
     /*
      * =========================================================================
-     * 【面试问答】关于序列化与断言的常见面试题（非可执行代码）
+     * 【ADR-015】泛型反序列化测试策略
      * =========================================================================
+     * 上下文：ApiResponse<T> 的泛型 T 在运行时被擦除，直接反序列化会得到
+     *         LinkedHashMap 而非目标类型。测试中需要验证完整序列化/反序列化链路。
+     * 决策：使用 ObjectMapper.getTypeFactory().constructParametricType() 显式指定
+     *      泛型类型，确保 data 字段被正确反序列化为 String。
+     * 替代方案：
+     *   A) 直接强转 (String) data —— 运行时 data 是 LinkedHashMap，ClassCastException。
+     *   B) 用 TypeReference<ApiResponse<String>>{} —— 也可行，但本测试选择
+     *      constructParametricType 展示更通用的方案（适合动态类型场景）。
+     *   C) 只验证 JSON 字符串不反序列化 —— 无法验证反序列化链路。
+     * 后果：测试验证了完整的序列化+反序列化链路；泛型擦除问题在测试阶段暴露；
+     *       前端/客户端集成时也需同样处理（用 TypeReference 或 ParameterizedType）。
      *
-     * Q1: 泛型反序列化 data 变成 LinkedHashMap 怎么办？
-     * A1: 泛型擦除导致 Jackson 不知道 data 的目标类型。
-     *     用 TypeReference<ApiResponse<String>>{} 或
-     *     TypeFactory.constructParametricType(ApiResponse.class, String.class)
-     *     显式告知。本类测试中用的就是后者。
-     *
-     * Q2: assertEquals 和 assertTrue 怎么选？
-     * A2: 优先 assertEquals(expected, actual)，失败信息清晰（显示两边值）。
-     *     assertTrue(actual.equals(expected)) 失败时只有 false，无值对比。
-     *
-     * Q3: 时间断言在 CI 上失败怎么排查？
-     * A3: CI 可能用 UTC 而本地用 GMT+8。统一在测试中指定时区，
-     *     或用 Instant（UTC 统一）而非 LocalDateTime 断言。
-     *
-     * Q4: ObjectMapper 要每次 new 吗？
-     * A4: 不要。ObjectMapper 是线程安全的重量级对象，应复用。
-     *     每次测试 new 一个会拖慢测试。可用 @BeforeAll 创建静态实例。
-     *
-     * Q5: null 字段出现在 JSON 中怎么办？
-     * A5: 加 @JsonInclude(JsonInclude.Include.NON_NULL) 在类或字段上，
-     *     或全局配置 spring.jackson.default-property-inclusion=non_null。
-     *
-     * Q6: 为什么不用 Thread.sleep 做异步测试？
-     * A6: Thread.sleep 不可靠（快环境浪费等待，慢环境不够等待）。
-     *     用 Awaitility（await().atMost(5,SECONDS).until()）或
-     *     CountDownLatch 做确定性等待。
+     * =========================================================================
+     * 【代码审查要点】序列化测试
+     * =========================================================================
+     * [ ] 泛型反序列化用 constructParametricType 或 TypeReference
+     * [ ] 断言信息可读（assertEquals(expected, actual) 而非 assertTrue）
+     * [ ] 时间断言考虑时区（CI 可能用 UTC）
+     * [ ] 共享 ObjectMapper（不要每个测试 new 一个）
+     * [ ] 不用 Thread.sleep 做异步测试（用 Awaitility 或 CountDownLatch）
+     * [ ] Boolean 字段名不以 is 开头（Jackson 去掉 is 前缀导致字段名不一致）
+     * [ ] null 字段加 @JsonInclude(NON_NULL) 或全局配置
      * =========================================================================
      */
 }

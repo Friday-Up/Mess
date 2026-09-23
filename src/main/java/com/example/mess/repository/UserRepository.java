@@ -91,39 +91,58 @@ public interface UserRepository extends JpaRepository<User, Long> {
 
 /*
  * =========================================================================
- * 【面试问答】关于 Spring Data JPA 的常见面试题（非可执行代码）
+ * 【ADR-005】Spring Data JPA 派生查询策略
  * =========================================================================
+ * 上下文：Repository 层需要定义数据访问方法，可选择派生方法名、@Query JPQL、
+ *         或原生 SQL 三种方式。
+ * 决策：简单查询（单表、条件少）用派生方法名（findBy/existsBy/countBy），
+ *       复杂查询用 @Query JPQL，原生 SQL 仅在 JPQL 无法表达时使用。
+ * 替代方案：
+ *   A) 全部用 @Query —— 语义清晰但简单查询也写 JPQL 增加维护量。
+ *   B) 全部用原生 SQL —— 绕过 JPA 抽象，失去跨数据库能力。
+ *   C) 用 Specification 动态查询 —— 适合条件组合查询，简单场景过重。
+ * 后果：80% 的查询用方法名自动生成，减少手写 SQL；复杂查询集中写在 @Query 中，
+ *       语义清晰可维护。派生方法名过长时自动切换到 @Query。
  *
- * Q1: JpaRepository、CrudRepository、Repository 有什么区别？
- * A1: Repository 是标记接口；CrudRepository 加了基础 CRUD；
- *     PagingAndSortingRepository 加了分页排序；
- *     JpaRepository 再加批量操作和 flush。日常直接继承 JpaRepository。
+ * =========================================================================
+ * 【代码审查要点】Repository
+ * =========================================================================
+ * [ ] 查询方法名语义清晰，能推断出 SQL 语义
+ * [ ] 存在性判断用 existsBy 而非 findBy（省一次实体映射）
+ * [ ] 只读方法加 @Transactional(readOnly = true)
+ * [ ] 分页用 Pageable，不用手写 limit/offset
+ * [ ] 排序字段白名单校验，不把前端入参直接拼进 SQL
+ * [ ] N+1 查询用 @EntityGraph 或 JOIN FETCH 解决
+ * [ ] 批量删除用原生 SQL 或批量 API，不用循环逐条 delete
+ * [ ] @Modifying 配合 @Transactional 使用
+ * [ ] 派生方法名过长（>5个条件）时改用 @Query JPQL
+ * =========================================================================
+ */
+
+/*
+ * =========================================================================
+ * 【ADR-005-S】分页与N+1问题策略（补充）
+ * =========================================================================
+ * 上下文：列表查询需要分页，关联查询容易产生 N+1 问题。
+ * 决策：分页用 Spring Data 的 Pageable；N+1 用 @EntityGraph 或 JOIN FETCH；
+ *       深分页用游标分页（WHERE id < lastId）替代 OFFSET。
+ * 替代方案：
+ *   A) 手写 limit/offset —— 绕过 Spring Data 抽象，失去分页元信息。
+ *   B) 不分页，全量返回 —— 数据量大时内存溢出，前端卡顿。
+ *   C) 用 Slice 替代 Page —— 不查总数，适合"加载更多"场景。
+ * 后果：Pageable 提供统一的分页抽象；深分页优化需额外处理；
+ *       @EntityGraph 声明式预加载，比 JOIN FETCH 更易维护。
  *
- * Q2: 派生方法名的命名规则是什么？
- * A2: find/exists/count + By + 字段名 + 关键词。
- *     findByUsernameAndEmail -> WHERE username=? AND email=?
- *     findByUsernameOrderByIdDesc -> ORDER BY id DESC
- *     名称太长或太复杂时就写 @Query JPQL。
+ * N+1 检测与解决：
+ *   检测：开 SQL 日志（spring.jpa.show-sql=true），看查询数是否异常
+ *   解决方案一：JOIN FETCH —— JPQL 中写，一次 JOIN 查出主实体+关联
+ *   解决方案二：@EntityGraph —— 声明式指定关联图，运行时自动 JOIN
+ *   解决方案三：hibernate.batch_fetch_size —— 分批 IN 查询，减少 SQL 数
  *
- * Q3: existsBy 和 findBy 哪个判断存在性更好？
- * A3: existsBy。底层用 SELECT COUNT 或 EXISTS，不加载实体，开销更小。
- *
- * Q4: 什么是 N+1 问题？怎么解决？
- * A4: 查 N 条主记录，每条的关联懒加载触发一条额外 SQL，共 N+1 条。
- *     解决：JOIN FETCH 一次查出；@EntityGraph 声明式预加载；
- *     或 hibernate.batch_fetch_size 分批 IN 查询。
- *
- * Q5: 深分页为什么慢？怎么优化？
- * A5: LIMIT 100000,20 要扫描前 100020 行再丢弃，offset 越大越慢。
- *     优化：游标分页 WHERE id < lastId；或先查主键页再 JOIN 回表。
- *
- * Q6: @Modifying 为什么要配 @Transactional？
- * A6: @Modifying 标识 UPDATE/DELETE，属于写操作，必须在事务内执行。
- *     没有 @Transactional 会报 TransactionRequiredException。
- *
- * Q7: JPA 和 MyBatis 怎么选？
- * A7: JPA 适合 CRUD 为主的简单业务，对象导航方便；
- *     MyBatis 适合复杂 SQL/报表/多表 JOIN，SQL 可控性更强。
- *     可混用：简单 CRUD 用 JPA，复杂报表用 MyBatis。
+ * 深分页优化：
+ *   问题：LIMIT 100000,20 要扫描前 100020 行再丢弃，offset 越大越慢
+ *   方案一：游标分页 WHERE id < lastId ORDER BY id DESC LIMIT 20
+ *   方案二：延迟关联，先查主键页再 JOIN 回表取数据
+ *   方案三：对超大数据集考虑搜索引擎（ES）而非关系库分页
  * =========================================================================
  */

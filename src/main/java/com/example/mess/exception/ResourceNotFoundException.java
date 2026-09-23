@@ -60,35 +60,51 @@ public class ResourceNotFoundException extends RuntimeException {
 
     /*
      * =========================================================================
-     * 【面试问答】关于自定义异常的常见面试题（非可执行代码）
+     * 【ADR-011】自定义异常继承策略
      * =========================================================================
+     * 上下文：需要为"资源不存在"场景定义业务异常，选择继承 Exception 还是
+     *         RuntimeException 影响调用方是否必须处理。
+     * 决策：继承 RuntimeException（unchecked），让 Service 方法签名保持干净，
+     *       由全局异常处理器统一收敛并映射 404。
+     * 替代方案：
+     *   A) 继承 Exception（checked）—— 每个调用方都要 try-catch 或 throws，
+     *      代码膨胀，且与全局处理器的设计理念冲突。
+     *   B) 不自定义，直接抛 IllegalArgumentException —— 语义不精确，
+     *      全局处理器无法区分"参数错误"和"资源不存在"。
+     *   C) 用一个通用 BusinessException + code 字段 —— 可行但异常类不直观，
+     *      @ExceptionHandler 无法按类型精确映射。
+     * 后果：Service 抛 ResourceNotFoundException，全局处理器自动映射 404；
+     *       新增异常类型（如 DuplicateResourceException -> 409）只需加类加 Handler。
      *
-     * Q1: 为什么继承 RuntimeException 而不是 Exception？
-     * A1: RuntimeException 是 unchecked，调用方不必 try-catch 或 throws，
-     *     Service 方法签名保持干净。配合全局异常处理器统一收敛。
-     *     若继承 Exception（checked），每个调用层都要声明，代码膨胀。
-     *
-     * Q2: 一个项目应该设计多少个异常类？
-     * A2: 按 HTTP 语义维度建，不是按字段维度：
-     *     ResourceNotFoundException -> 404
-     *     DuplicateResourceException -> 409
-     *     ValidationException -> 400
-     *     OperationNotAllowedException -> 403
-     *     不必每个字段一个异常类，维护成本远超收益。
-     *
-     * Q3: 异常 message 应该写什么？
-     * A3: 面向用户的可读文案 + 关键上下文。
-     *     "用户ID=123不存在" 比 "资源不存在" 更有利于排障。
-     *     不要带 SQL/表名/堆栈（安全风险）。
-     *
-     * Q4: 自定义异常需要序列化吗？
-     * A4: 如果可能跨网络传输（如 RPC），需实现 Serializable。
-     *     本项目内 Web API 不需要，全局处理器把异常转为 JSON 响应即可。
-     *
-     * Q5: 为什么不在 Controller 里 try-catch？
-     * A5: Controller 应保持轻薄。异常处理集中在全局处理器，
-     *     Controller 只管"正常路径"，异常路径由框架兜底。
-     *     到处 try-catch 返回错误 JSON 会导致重复代码和遗漏。
+     * =========================================================================
+     * 【代码审查要点】自定义异常
+     * =========================================================================
+     * [ ] 继承 RuntimeException（unchecked），不继承 Exception
+     * [ ] 提供无参构造（默认文案）和带 message 构造（动态信息）
+     * [ ] 异常名见名知义（ResourceNotFoundException > BizException）
+     * [ ] message 带上下文（"用户ID=123不存在" > "资源不存在"）
+     * [ ] 有对应 @ExceptionHandler，不会漏到 500 兜底
+     * [ ] 不在异常 message 中带 SQL/表名/堆栈（安全风险）
+     * [ ] 不每个字段一个异常类（维护成本远超收益）
+     * =========================================================================
+     */
+
+    /*
+     * =========================================================================
+     * 【ADR-011-S】异常层次设计策略（补充）
+     * =========================================================================
+     * 上下文：随着业务增长，异常类型会增多，需要合理的层次结构。
+     * 决策：按 HTTP 语义维度建异常类，不按业务字段维度。
+     *       可选中间层 BusinessException 统一标记业务异常。
+     * 推荐层次：
+     *   RuntimeException
+     *     └─ BusinessException（可选中间层，统一标记业务异常）
+     *          ├─ ResourceNotFoundException   -> 404
+     *          ├─ DuplicateResourceException   -> 409
+     *          ├─ ValidationException          -> 400
+     *          └─ OperationNotAllowedException -> 403
+     * 后果：新增异常类型只需加类加 Handler，不影响已有映射；
+     *       全局处理器可按 BusinessException 统一处理共性逻辑（如日志格式）。
      * =========================================================================
      */
 }

@@ -217,77 +217,59 @@ public class UserService {
 
     /*
      * =========================================================================
-     * 【面试问答】关于 Service 层事务与缓存的常见面试题（非可执行代码）
+     * 【ADR-006】缓存与事务一致性策略
      * =========================================================================
+     * 上下文：Service 层同时承担业务逻辑、事务管理和缓存协调三重职责，
+     *         三者的交互顺序和边界直接影响数据一致性。
+     * 决策：写操作在事务内完成，写后用 @CacheEvict 清除相关缓存；
+     *       读操作用 @Cacheable 缓存结果。采用"最终一致"策略，
+     *       即缓存清除与数据库提交之间存在极短窗口，可接受。
+     * 替代方案：
+     *   A) 强一致缓存（事务提交后才清缓存）—— 需 Two-Phase Commit，复杂度高。
+     *   B) 不用缓存，每次查库 —— 简单但性能差。
+     *   C) 写操作更新缓存而非清除（@CachePut）—— 缓存与库的值可能不一致。
+     * 后果：绝大多数场景下缓存与库一致；极端窗口期可能读到旧数据，
+     *       下次缓存过期后自动修正。需确保 @EnableCaching 存在且不自调用。
      *
-     * Q1: @Transactional 失效的场景有哪些？
-     * A1: 1) 自调用：this.method() 不走 AOP 代理，注解不生效；
-     *     2) 方法非 public：代理不拦截非 public 方法；
-     *     3) 异常被 catch 吞掉：没抛出就没有回滚触发；
-     *     4) 抛 checked 异常：默认不回滚，需 rollbackFor=Exception.class。
-     *
-     * Q2: @Transactional 默认回滚哪些异常？
-     * A2: 仅 RuntimeException 及其子类。受检异常默认不回滚。
-     *     需要回滚受检异常时加 rollbackFor = Exception.class。
-     *
-     * Q3: REQUIRES_NEW 和 NESTED 的区别？
-     * A3: REQUIRES_NEW 挂起外层事务，开独立新事务，两个事务互不影响；
-     *     NESTED 在当前事务内开保存点，子事务回滚不影响外层，
-     *     但外层回滚会连带子事务一起回滚。依赖 JDBC 保存点支持。
-     *
-     * Q4: @Cacheable 自调用为什么失效？
-     * A4: Spring Cache 基于 AOP 代理，自调用 this.method() 绕过代理，
-     *     注解不会被拦截。解决：通过注入自身代理调用，或拆到另一个 Bean。
-     *
-     * Q5: 缓存与数据库不一致怎么办？
-     * A5: 常见策略：写操作后 @CacheEvict 删缓存，读操作再回填。
-     *     这是"最终一致"策略。强一致需分布式锁或事务缓存，成本高。
-     *
-     * Q6: 为什么不能在事务方法里调远程 HTTP？
-     * A6: 事务期间持有数据库连接和行锁，HTTP 调用慢会长时间占锁，
-     *     高并发下导致连接池耗尽和死锁。应把 HTTP 调用移到事务外。
+     * =========================================================================
+     * 【代码审查要点】Service 层
+     * =========================================================================
+     * [ ] 写方法在事务内完成（@Transactional）
+     * [ ] 只读方法加 @Transactional(readOnly = true)
+     * [ ] 唯一性校验依赖数据库索引兜底（应用层 existsBy 只做优化）
+     * [ ] 业务异常用自定义异常类，不抛 SQLException/JPAException
+     * [ ] 缓存注解不自调用（this.method() 不走代理，注解失效）
+     * [ ] 不在事务方法里调远程 HTTP（锁表期间等远端响应，风险极高）
+     * [ ] 日志记录关键决策点，不只是出入参
+     * [ ] 每个 public 方法对应一个业务用例，边界清晰
+     * [ ] Service 只依赖 Repository 接口，不依赖具体实现
      * =========================================================================
      */
 
     /*
      * =========================================================================
-     * 【源码走读】@Transactional 的 AOP 代理原理（非可执行代码）
+     * 【ADR-006-S】事务传播级别选择策略（补充）
      * =========================================================================
+     * 上下文：Service 方法间互相调用时，事务传播行为直接影响数据一致性。
+     * 决策：默认 REQUIRED（有事务加入，无则新建）；审计日志等需独立事务的
+     *       场景用 REQUIRES_NEW；只读查询用 SUPPORTS 或 readOnly。
+     * 替代方案：
+     *   A) 全部 REQUIRED —— 简单但审计日志与主事务绑定，主回滚则审计也回滚。
+     *   B) 全部 REQUIRES_NEW —— 每个方法开独立事务，连接池压力大，易死锁。
+     *   C) 不声明传播级别 —— 默认 REQUIRED，行为隐式，新人不易理解。
+     * 后果：默认 REQUIRED 满足大多数场景；REQUIRES_NEW 仅用于"无论主事务成败
+     *       都要记录"的场景（审计日志）；只读查询加 readOnly 减少锁开销。
      *
-     * 一、Spring 如何实现声明式事务
-     *    Spring 通过 AOP 代理为 @Transactional 方法织入事务逻辑：
-     *    1) 创建代理：CGLIB（默认）或 JDK 动态代理
-     *    2) 方法调用时，代理拦截器（TransactionInterceptor）先执行：
-     *       a) 开启事务（getTransaction）
-     *       b) 调用真实方法
-     *       c) 正常返回 -> 提交；抛 RuntimeException -> 回滚
-     *    3) 代理只在外部调用时生效，this.method() 不经过代理
+     * 传播级别速查：
+     *   REQUIRED      有事务加入，无则新建（默认，绝大多数场景）
+     *   REQUIRES_NEW  挂起当前事务，新开独立事务（审计日志）
+     *   NESTED        当前事务内开保存点，子回滚不影响父（批量允许个别失败）
+     *   SUPPORTS      有事务就用，没有就非事务执行（只读查询）
+     *   NOT_SUPPORTED 挂起事务，非事务执行（长耗时只读操作）
+     *   MANDATORY     必须在事务内，否则抛异常（框架级约束）
+     *   NEVER         不能在事务内，否则抛异常（框架级约束）
      *
-     * 二、为什么自调用失效
-     *    this.method() 是对象内部直接调用，不经过代理对象。
-     *    AOP 代理只在"从外部通过 Bean 引用调用"时才拦截。
-     *    解决方案：
-     *      - 注入自身代理：@Autowired private XxxService self; self.method();
-     *      - 拆到另一个 Bean 中调用
-     *      - 用 AopContext.currentProxy()（需开启 exposeProxy）
-     *
-     * 三、事务与异常的关系
-     *    Spring 默认：RuntimeException -> 回滚；checked Exception -> 不回滚
-     *    原因：Spring 遵循 EJB 约定，认为 checked 异常是"可恢复的业务异常"。
-     *    若需 checked 也回滚：@Transactional(rollbackFor = Exception.class)
-     *
-     * 四、事务隔离级别
-     *    DEFAULT          使用数据库默认（MySQL InnoDB 默认 REPEATABLE_READ）
-     *    READ_UNCOMMITTED 读未提交（脏读）
-     *    READ_COMMITTED   读已提交（不可重复读，PG/Oracle 默认）
-     *    REPEATABLE_READ  可重复读（幻读，MySQL InnoDB 默认）
-     *    SERIALIZABLE     串行化（最强隔离，性能最差）
-     *
-     * 五、只读事务的优化
-     *    @Transactional(readOnly = true) 提示底层做优化：
-     *    - Hibernate 不做脏检查（FlushMode.MANUAL）
-     *    - MySQL 不加行锁（降低开销）
-     *    只对查询方法加，不要对写方法加。
+     * 注意：REQUIRES_NEW 持有两个数据库连接，高并发下可能耗尽连接池。
      * =========================================================================
      */
 }

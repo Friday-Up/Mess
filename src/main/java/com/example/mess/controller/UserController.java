@@ -173,77 +173,57 @@ public class UserController {
 
     /*
      * =========================================================================
-     * 【面试问答】关于 Controller 与 RESTful 的常见面试题（非可执行代码）
+     * 【ADR-007】RESTful 接口契约策略
      * =========================================================================
+     * 上下文：API 设计需要统一的路由规范、参数绑定方式和响应格式，
+     *         否则每个接口风格不一致，前端联调成本高。
+     * 决策：资源用复数名词（/api/users），动作用 HTTP 方法表达；
+     *       参数绑定：路径用 @PathVariable，查询用 @RequestParam，体用 @RequestBody；
+     *       所有接口返回统一 ApiResponse<T>。
+     * 替代方案：
+     *   A) 动词路由（/api/getUser、/api/deleteUser）—— 不 RESTful，路由膨胀。
+     *   B) 不用 @RequestBody，用 @RequestParam 传 JSON 字符串 —— 反模式。
+     *   C) 每个接口自定义响应格式 —— 前端无法统一处理。
+     * 后果：接口风格一致，前端统一拦截器处理；新增接口遵循同一契约；
+     *       但需团队遵守规范，Code Review 时重点检查。
      *
-     * Q1: @Controller 和 @RestController 的区别？
-     * A1: @RestController = @Controller + @ResponseBody。
-     *     前者返回视图名（HTML 页面），后者返回值直接序列化为 JSON。
-     *
-     * Q2: @PathVariable 和 @RequestParam 的区别？
-     * A2: @PathVariable 从 URL 路径中取值（/users/{id} -> id）；
-     *     @RequestParam 从查询串中取值（/users?name=alice -> name）。
-     *
-     * Q3: @Valid 加在哪里？不生效怎么办？
-     * A3: 加在 @RequestBody 参数前。不生效检查：
-     *     1) 参数前确实有 @Valid 注解；
-     *     2) DTO 字段上有校验注解（@NotBlank 等）；
-     *     3) 全局异常处理器捕获了 MethodArgumentNotValidException。
-     *
-     * Q4: RESTful 怎么设计 URL？
-     * A4: 资源用名词复数（/api/users），动作用 HTTP 方法表达。
-     *     GET=/api/users（列表）GET=/api/users/{id}（详情）
-     *     POST=/api/users（创建）PUT=/api/users/{id}（全量更新）
-     *     DELETE=/api/users/{id}（删除）
-     *
-     * Q5: POST 和 PUT 的幂等性区别？
-     * A5: PUT 幂等（多次调用结果一致），POST 不幂等（重复提交创建多条）。
-     *     防重复提交：前端按钮禁用 + 后端幂等键/唯一约束。
-     *
-     * Q6: 404 和 403 怎么选？
-     * A6: 资源不存在 -> 404；存在但无权访问 -> 403。
-     *     安全注意：敏感资源不应对无权用户暴露"存在"（403 泄露存在性），
-     *     可考虑统一返回 404。
+     * =========================================================================
+     * 【代码审查要点】Controller 层
+     * =========================================================================
+     * [ ] 路由用复数名词（/api/users），HTTP 动词语义正确
+     * [ ] @RequestBody 参数加 @Valid 触发校验
+     * [ ] 路径参数用 @PathVariable，查询参数用 @RequestParam
+     * [ ] 返回统一 ApiResponse，不返回裸对象
+     * [ ] Controller 不含业务逻辑（只做协议适配，委派 Service）
+     * [ ] DELETE 操作幂等（删不存在的 id 不报错）
+     * [ ] 接口有文档（Swagger/springdoc 注解或 README）
+     * [ ] 不在 Controller 里 try-catch 返回错误 JSON（由全局处理器兜底）
+     * [ ] POST 创建返回 201 或 200 + data（含新对象 id）
      * =========================================================================
      */
 
     /*
      * =========================================================================
-     * 【源码走读】Spring MVC 请求处理流程（非可执行代码）
+     * 【ADR-007-S】API 版本管理策略（补充）
      * =========================================================================
+     * 上下文：接口需要演进（新增字段、修改语义、删除端点），如何保证
+     *         现有客户端不被破坏？
+     * 决策：当前项目初期，暂不做版本管理。演进时遵循"只加不改"原则：
+     *       新增字段可为 null、新增端点、不删除已有端点/字段。
+     *       破坏性变更时引入 URL 版本（/api/v2/users）。
+     * 替代方案：
+     *   A) 从一开始就版本化（/api/v1/users）—— 增加路由复杂度，初期无收益。
+     *   B) Header 版本（Accept: application/vnd.mess.v1+json）—— REST 味道足，
+     *      但调试麻烦，工具支持弱。
+     *   C) 查询参数版本（/api/users?version=1）—— 简单但缓存/路由不友好。
+     * 后果：初期简洁；破坏性变更时需开 v2 并维护 v1 直到所有客户端迁移。
      *
-     * 一、一次 HTTP 请求的旅程
-     *    1) Tomcat 接收请求，交给 DispatcherServlet
-     *    2) DispatcherServlet 查 HandlerMapping 找到匹配的 Controller 方法
-     *    3) HandlerAdapter 调用 Controller 方法：
-     *       a) 参数解析：@RequestBody -> HttpMessageConverter 反序列化
-     *       b) 校验：@Valid -> Hibernate Validator
-     *       c) 执行方法
-     *       d) 返回值处理：@ResponseBody -> 序列化为 JSON
-     *    4) 如果有异常，交给 HandlerExceptionResolver（@ExceptionHandler）
-     *    5) Response 返回客户端
-     *
-     * 二、@ResponseBody 的作用
-     *    标注后，返回值不走视图解析器（ViewResolver），
-     *    而是交给 HttpMessageConverter（如 MappingJackson2HttpMessageConverter）
-     *    序列化为 JSON 写入响应体。@RestController 已隐含 @ResponseBody。
-     *
-     * 三、@Valid 的触发时机
-     *    在参数解析阶段，HttpMessageConverter 反序列化完请求体后，
-     *    RequestResponseBodyMethodProcessor 检查参数上是否有 @Valid，
-     *    有则调用 validator.validate()，失败抛 MethodArgumentNotValidException。
-     *
-     * 四、全局异常处理器的接入点
-     *    ExceptionHandlerExceptionResolver 遍历所有 @ControllerAdvice 类，
-     *    找到匹配异常类型的 @ExceptionHandler 方法执行。
-     *    匹配逻辑：异常类型继承距离最近的优先。
-     *
-     * 五、拦截器 vs 过滤器
-     *    Filter（过滤器）：Servlet 容器层，在 DispatcherServlet 前后执行，
-     *      可改请求/响应对象，Spring MVC 之外也生效。
-     *    Interceptor（拦截器）：Spring MVC 层，在 Handler 执行前后执行，
-     *      可访问 HandlerMethod，但拿不到原始请求体（已被读取）。
-     *    Security 过滤器链是 Filter 层，@ControllerAdvice 是 MVC 层。
+     * 兼容性评审清单：
+     *   [ ] 新增字段对旧客户端是否无害（可为 null、有默认值）
+     *   [ ] 删除字段是否已确认无消费方
+     *   [ ] 枚举新增取值旧客户端能否容错
+     *   [ ] 错误码结构是否保持一致
+     *   [ ] 分页格式、排序规则是否向后兼容
      * =========================================================================
      */
 }

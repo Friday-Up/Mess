@@ -194,35 +194,30 @@ class UserServiceTest {
 
     /*
      * =========================================================================
-     * 【面试问答】关于 Mockito 单元测试的常见面试题（非可执行代码）
+     * 【ADR-013】单元测试隔离策略
      * =========================================================================
+     * 上下文：Service 单元测试需要隔离外部依赖（Repository/缓存/远程服务），
+     *         只验证 Service 自身的业务逻辑。
+     * 决策：用 Mockito @Mock 隔离 Repository，@InjectMocks 注入被测 Service。
+     *       每个测试只验证一个行为，遵循 Arrange/Act/Assert 三段式。
+     * 替代方案：
+     *   A) 用真实数据库（@DataJpaTest）—— 是集成测试，不是单元测试，慢。
+     *   B) 用 @SpringBootTest + @MockBean —— 启动完整上下文，更慢。
+     *   C) 不 mock，直接 new Repository —— Repository 是接口无法实例化。
+     * 后果：测试毫秒级完成，只验证业务逻辑；但 mock 太多会架空被测对象，
+     *       需确保 mock 的行为与真实实现一致。
      *
-     * Q1: @Mock 和 @InjectMocks 分别做什么？
-     * A1: @Mock 创建依赖的 mock 对象（空壳，方法返回默认值）；
-     *     @InjectMocks 创建被测对象，自动注入 @Mock 依赖。
-     *     需配合 @ExtendWith(MockitoExtension.class) 或 MockitoAnnotations.openMocks()。
-     *
-     * Q2: when().thenReturn() 和 doReturn().when() 的区别？
-     * A2: 前者先调真实方法再覆盖（对 spy 可能触发副作用）；
-     *     后者不调真实方法，更安全。对 void 方法只能用 doNothing/doThrow。
-     *
-     * Q3: verify 和 verifyNoMoreInteractions 的关系？
-     * A3: verify 确认指定调用发生过；verifyNoMoreInteractions 确认
-     *     除了已 verify 的调用外没有其他调用。后者放最后，起"严格校验"作用。
-     *
-     * Q4: ArgumentCaptor 有什么用？
-     * A4: 捕获传给 mock 的参数值，用于断言"参数被正确组装"。
-     *     verify(repo).save(captor.capture()); 断言 captor.getValue() 的字段。
-     *     比 any() 更精细，能验证具体内容而非仅类型。
-     *
-     * Q5: mock 太多导致"测试只验证了 mock"怎么办？
-     * A5: 说明被测对象的业务逻辑被架空了。应减少 mock，
-     *     用真实依赖测试有价值的逻辑。需要真实序列化/数据库交互时
-     *     不要 mock，改用切片测试或集成测试。
-     *
-     * Q6: Arrange/Act/Assert 三段式是什么？
-     * A6: Arrange 准备数据和 mock 打桩；Act 执行被测方法；
-     *     Assert 验证返回值和交互。三段用空行分隔，阅读即知意图。
+     * =========================================================================
+     * 【代码审查要点】Mockito 单元测试
+     * =========================================================================
+     * [ ] 每个 @Test 只验证一个行为（命名：方法_场景_期望结果）
+     * [ ] Arrange/Act/Assert 三段式，阅读即知意图
+     * [ ] @BeforeEach 只放公共 mock 初始化，不在测试间共享可变状态
+     * [ ] verify 精确到 times(n)，不写无 times 的 verify
+     * [ ] verifyNoMoreInteractions 放最后，确保没有意外调用
+     * [ ] 不 mock 返回值又给返回值本身打桩（等于测 mock 而非业务逻辑）
+     * [ ] 需要真实序列化/数据库交互时不要 mock，改用切片测试或集成测试
+     * [ ] 测试命名自解释：createUser_validInput_returnsCreatedUser
      * =========================================================================
      */
 }
