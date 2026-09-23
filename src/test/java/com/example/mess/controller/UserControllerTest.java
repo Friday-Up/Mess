@@ -220,59 +220,43 @@ class UserControllerTest {
 
     /*
      * =========================================================================
-     * 【ADR-014】MockMvc 测试模式策略
+     * 【技术债务】TD-014 Controller 测试
      * =========================================================================
-     * 上下文：Controller 测试需要验证 HTTP 请求/响应的完整链路（路由、参数绑定、
-     *         序列化、状态码），但不需要启动真实 Web 容器。
-     * 决策：用 MockMvc.standaloneSetup 轻量测试 Controller 层，
-     *       Service 用 @Mock 隔离。适合验证路由+参数绑定+响应结构。
-     * 替代方案：
-     *   A) @WebMvcTest + @MockBean —— 加载 Web 切片（含全局异常处理器），
-     *      更接近真实但更慢，需替换 Service。
-     *   B) @SpringBootTest + MockMvc —— 启动完整上下文，最慢最真实。
-     *   C) 真实 HTTP 调用（RestTemplate/TestRestTemplate）—— 需启动容器，最慢。
-     * 后果：standaloneSetup 轻快但不加载全局异常处理器和 Security；
-     *       需要验证异常处理时改用 @WebMvcTest。
+     *
+     * TD-014-1: 未测试异常路径
+     *   现状：只测正常路径，未测 Service 抛异常时的响应
+     *   影响：异常处理链路未验证
+     *   优先级：P2
+     *   修复方案：加 Service 抛 ResourceNotFoundException 时返回 404 的测试
+     *   预估工时：0.5d
+     *
+     * TD-014-2: 未测试参数校验失败
+     *   现状：无 @Valid 校验失败的测试
+     *   影响：非法输入的 400 响应未验证
+     *   优先级：P2
+     *   修复方案：加空 body/缺必填字段的请求，断言 400
+     *   预估工时：0.5d
+     *
+     * TD-014-3: standaloneSetup 不含全局异常处理器
+     *   现状：standaloneSetup 未加载 GlobalExceptionHandler
+     *   影响：异常响应格式与生产不一致
+     *   优先级：P2
+     *   修复方案：加 .setControllerAdvice(GlobalExceptionHandler.class) 或改 @WebMvcTest
+     *   预估工时：0.5d
+     *
+     * TD-014-4: 未测试分页
+     *   现状：findAll 返回全部数据，无分页参数测试
+     *   影响：分页功能上线后无测试保障
+     *   优先级：P3
+     *   修复方案：加分页参数测试（page/size/sort）
+     *   预估工时：0.5d
      *
      * =========================================================================
-     * 【代码审查要点】MockMvc 测试
+     * 【重构路线图】Controller 测试演进方向
      * =========================================================================
-     * [ ] 请求路径和 HTTP 方法与 Controller 定义一致
-     * [ ] Content-Type 设为 application/json（POST/PUT 带 body 时）
-     * [ ] 断言状态码 + JSON 结构（jsonPath）
-     * [ ] jsonPath 的 data 字段类型断言明确（is() 而非空判断）
-     * [ ] verify 确认 Service 被调用了正确次数
-     * [ ] standaloneSetup 与 @WebMvcTest 不要混用
-     * [ ] standaloneSetup 下异常不被全局处理器拦截（需 .setControllerAdvice()）
-     * [ ] 测试命名自解释：getUser_existingId_returnsUser
-     * =========================================================================
-     */
-
-    /*
-     * =========================================================================
-     * 【ADR-014-S】测试金字塔与 CI 集成策略（补充）
-     * =========================================================================
-     * 上下文：项目需要合理的测试分层，CI 需要快速反馈。
-     * 决策：单元测试 70%（Mockito mock）、切片测试 20%（@WebMvcTest/@DataJpaTest）、
-     *       集成测试 10%（@SpringBootTest），形成稳定的测试金字塔。
-     * 替代方案：
-     *   A) 只有集成测试 —— CI 慢、定位问题难（倒金字塔）。
-     *   B) 只有单元测试 —— 不验证上下文装配和序列化链路。
-     *   C) 不写测试 —— 靠手动验证，回归成本极高。
-     * 后果：CI 快速反馈（单元测试秒级）；关键链路有集成测试兜底；
-     *       测试覆盖率作为参考指标，不作为唯一质量门禁。
-     *
-     * CI 集成要点：
-     *   - mvn test 跑所有测试，mvn -Dtest=ClassName 只跑指定类
-     *   - mvn -Dgroups=unit 跑分组测试（需 JUnit5 @Tag 标注）
-     *   - 测试失败的 CI 应阻断合并，不能忽略
-     *   - 历史遗留测试编译失败时可用 -Dmaven.test.skip=true 临时跳过
-     *     但应尽快修复，不要长期跳过
-     *
-     * 测试数据管理：
-     *   - 小项目：测试方法内自建数据，互不依赖
-     *   - 中项目：@BeforeEach 初始化 + @Transactional @Rollback 回滚
-     *   - 大项目：data.sql / Flyway 测试脚本 + Testcontainers 真实数据库
+     * Phase 1（当前）：正常路径 + standaloneSetup
+     * Phase 2：异常路径 + 参数校验 + 全局异常处理器
+     * Phase 3：@WebMvcTest + Security 集成测试 + 分页测试
      * =========================================================================
      */
 }

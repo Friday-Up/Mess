@@ -177,30 +177,43 @@ class HelloControllerTest {
 
     /*
      * =========================================================================
-     * 【ADR-015】泛型反序列化测试策略
+     * 【技术债务】TD-015 序列化测试
      * =========================================================================
-     * 上下文：ApiResponse<T> 的泛型 T 在运行时被擦除，直接反序列化会得到
-     *         LinkedHashMap 而非目标类型。测试中需要验证完整序列化/反序列化链路。
-     * 决策：使用 ObjectMapper.getTypeFactory().constructParametricType() 显式指定
-     *      泛型类型，确保 data 字段被正确反序列化为 String。
-     * 替代方案：
-     *   A) 直接强转 (String) data —— 运行时 data 是 LinkedHashMap，ClassCastException。
-     *   B) 用 TypeReference<ApiResponse<String>>{} —— 也可行，但本测试选择
-     *      constructParametricType 展示更通用的方案（适合动态类型场景）。
-     *   C) 只验证 JSON 字符串不反序列化 —— 无法验证反序列化链路。
-     * 后果：测试验证了完整的序列化+反序列化链路；泛型擦除问题在测试阶段暴露；
-     *       前端/客户端集成时也需同样处理（用 TypeReference 或 ParameterizedType）。
+     *
+     * TD-015-1: 未测试失败场景
+     *   现状：只测成功路径，未测异常时的响应格式
+     *   影响：异常响应是否为统一 ApiResponse 格式未验证
+     *   优先级：P2
+     *   修复方案：加 Service 抛异常时的序列化测试
+     *   预估工时：0.5d
+     *
+     * TD-015-2: 未测试时间格式化
+     *   现状：无 LocalDateTime 字段的序列化测试
+     *   影响：时间格式化是否正确未验证
+     *   优先级：P3
+     *   修复方案：加含时间字段的 DTO 序列化/反序列化测试
+     *   预估工时：0.5d
+     *
+     * TD-015-3: 未测试 null 字段过滤
+     *   现状：未验证 @JsonInclude(NON_NULL) 是否生效
+     *   影响：null 字段是否出现在 JSON 中未验证
+     *   优先级：P3
+     *   修复方案：加 null 字段的序列化测试
+     *   预估工时：0.5d
+     *
+     * TD-015-4: ObjectMapper 配置未测试
+     *   现状：未验证全局 Jackson 配置（日期格式/时区/null 处理）是否生效
+     *   影响：配置变更可能导致序列化行为变化但无测试保障
+     *   优先级：P3
+     *   修复方案：加 @JsonTest 验证 Jackson 配置
+     *   预估工时：0.5d
      *
      * =========================================================================
-     * 【代码审查要点】序列化测试
+     * 【重构路线图】序列化测试演进方向
      * =========================================================================
-     * [ ] 泛型反序列化用 constructParametricType 或 TypeReference
-     * [ ] 断言信息可读（assertEquals(expected, actual) 而非 assertTrue）
-     * [ ] 时间断言考虑时区（CI 可能用 UTC）
-     * [ ] 共享 ObjectMapper（不要每个测试 new 一个）
-     * [ ] 不用 Thread.sleep 做异步测试（用 Awaitility 或 CountDownLatch）
-     * [ ] Boolean 字段名不以 is 开头（Jackson 去掉 is 前缀导致字段名不一致）
-     * [ ] null 字段加 @JsonInclude(NON_NULL) 或全局配置
+     * Phase 1（当前）：成功路径 + 泛型反序列化
+     * Phase 2：异常路径 + 时间格式化 + null 字段过滤
+     * Phase 3：@JsonTest 全局配置验证 + 契约测试（JSON Schema）
      * =========================================================================
      */
 }

@@ -143,60 +143,85 @@ public class SecurityConfig {
 
     /*
      * =========================================================================
-     * 【ADR-009】认证方案选择策略
+     * 【技术债务】TD-009 安全配置
      * =========================================================================
-     * 上下文：项目需要认证机制保护接口，可选 Session+Cookie、JWT Token、
-     *         OAuth2 等方案。当前是开发/演示阶段，先用内存用户快速验证。
-     * 决策：开发阶段用 InMemoryUserDetailsManager + BCryptPasswordEncoder，
-     *       禁用 CSRF（因为走 Token 认证路线），生产阶段迁移到数据库用户 + JWT。
-     * 替代方案：
-     *   A) Session+Cookie —— 有状态，不适合微服务和前后端分离。
-     *   B) 直接上 JWT —— 开发阶段配置复杂，拖慢初期进度。
-     *   C) 不做认证 —— 接口裸奔，安全风险极高。
-     * 后果：开发阶段快速可用；生产迁移需：1) 实现 UserDetailsService 查数据库；
-     *       2) 加 JWT Filter；3) sessionCreationPolicy(STATELESS)；
-     *       4) CORS 显式配置；5) 安全响应头加固。
+     *
+     * TD-009-1: 使用内存用户存储
+     *   现状：InMemoryUserDetailsManager，用户数据硬编码
+     *   影响：应用重启用户丢失，无法动态增删用户
+     *   优先级：P1（生产不可用）
+     *   修复方案：实现 UserDetailsService 查数据库
+     *   预估工时：2d
+     *
+     * TD-009-2: 无 JWT/Token 认证
+     *   现状：基于 Session 的认证，不适合前后端分离
+     *   影响：跨域场景认证困难，水平扩展需 Session 共享
+     *   优先级：P1
+     *   修复方案：加 JWT Filter + sessionCreationPolicy(STATELESS)
+     *   预估工时：2d
+     *
+     * TD-009-3: CORS 未配置
+     *   现状：未显式配置 CORS
+     *   影响：前端跨域请求可能被拒绝
+     *   优先级：P2
+     *   修复方案：加 .cors(Customizer.withDefaults()) + CorsConfigurationSource Bean
+     *   预估工时：0.5d
+     *
+     * TD-009-4: 缺少安全响应头
+     *   现状：无 X-Content-Type-Options/X-Frame-Options/CSP/HSTS
+     *   影响：易受点击劫持/MIME 嗅探等攻击
+     *   优先级：P2
+     *   修复方案：加 headers().contentTypeOptions().frameOptions().xssProtection()
+     *   预估工时：0.5d
+     *
+     * TD-009-5: 缺少登录/登出端点
+     *   现状：无显式登录接口
+     *   影响：前端无法获取 Token/Session
+     *   优先级：P1
+     *   修复方案：加 /api/auth/login + /api/auth/logout
+     *   预估工时：1d
      *
      * =========================================================================
-     * 【代码审查要点】安全配置
+     * 【重构路线图】安全配置演进方向
      * =========================================================================
-     * [ ] 生产环境不用 InMemoryUserDetailsManager，改数据库 UserDetailsService
-     * [ ] 密码用 BCryptPasswordEncoder 或更强算法，不明文存储
-     * [ ] 授权规则先精确后宽泛（anyRequest 放最后）
-     * [ ] CORS 显式配置允许来源，不用 *
-     * [ ] 敏感接口有权限要求（不是 permitAll）
-     * [ ] 认证失败返回 401，权限不足返回 403
-     * [ ] CSRF 策略明确：Token 认证可禁用，Cookie 认证需启用
-     * [ ] 用户/密钥不放代码中，用环境变量或密钥管理服务
-     * [ ] Security 的 401/403 需单独配置 AuthenticationEntryPoint/AccessDeniedHandler
+     * Phase 1（当前）：内存用户 + Session 认证 + CSRF 禁用
+     * Phase 2：数据库用户 + JWT Token + CORS + 安全响应头
+     * Phase 3：OAuth2/SSO + RBAC 权限模型 + 审计日志 + 限流
      * =========================================================================
      */
 
     /*
      * =========================================================================
-     * 【ADR-009-S】密码存储演进策略（补充）
+     * 【技术债务】TD-009-S 安全配置补充
      * =========================================================================
-     * 上下文：密码存储方案直接影响用户数据安全，需选择抗破解的算法。
-     * 决策：使用 BCryptPasswordEncoder，内置随机盐 + 可调计算代价（cost factor），
-     *       抗暴力破解和彩虹表攻击。
-     * 替代方案：
-     *   A) 明文存储 —— 数据库泄露即全部裸奔，不可接受。
-     *   B) MD5/SHA1 哈希 —— 可被彩虹表秒破，已不安全。
-     *   C) 加盐 SHA256 —— 比上一代好，但 GPU 暴力破解仍可行。
-     *   D) Argon2 —— 比 BCrypt 更新更强，但 Spring 内建支持不如 BCrypt 完善。
-     * 后果：BCrypt 是 Spring Security 默认推荐，生态支持好；
-     *       cost factor >= 10 可调，硬件升级后可提高代价保持安全性。
      *
-     * 生产迁移清单：
-     *   [ ] InMemoryUserDetailsManager -> 自定义 UserDetailsService（查数据库）
-     *   [ ] 密码编码器确认 BCryptPasswordEncoder
-     *   [ ] 认证从 Session+Cookie 改为 JWT 或 OAuth2（无状态）
-     *   [ ] sessionCreationPolicy(STATELESS) 关闭 Session
-     *   [ ] CORS 显式配置允许来源（不用 *）
-     *   [ ] 安全响应头：X-Content-Type-Options, X-Frame-Options,
-     *       Content-Security-Policy, Strict-Transport-Security
-     *   [ ] 登录失败锁定策略（连续 N 次失败临时锁定）
-     *   [ ] 审计日志：记录登录成功/失败、敏感操作
+     * TD-009-6: 缺少密码强度策略
+     *   现状：无密码复杂度要求
+     *   影响：弱密码易被暴力破解
+     *   优先级：P2
+     *   修复方案：加 PasswordValidator（长度/大小写/数字/特殊字符）
+     *   预估工时：0.5d
+     *
+     * TD-009-7: 缺少登录失败锁定
+     *   现状：无连续失败锁定机制
+     *   影响：可无限次尝试暴力破解
+     *   优先级：P2
+     *   修复方案：加失败计数 + 临时锁定（如 5 次失败锁定 15 分钟）
+     *   预估工时：1d
+     *
+     * TD-009-8: 缺少审计日志
+     *   现状：无登录成功/失败/权限拒绝的审计记录
+     *   影响：安全事件无法追溯
+     *   优先级：P2
+     *   修复方案：加 AuthenticationSuccessHandler/FailureHandler 记录日志
+     *   预估工时：1d
+     *
+     * TD-009-9: 密钥/凭证硬编码
+     *   现状：用户名密码硬编码在 Java 代码中
+     *   影响：代码泄露即凭证泄露
+     *   优先级：P1
+     *   修复方案：迁移到环境变量或密钥管理服务
+     *   预估工时：0.5d
      * =========================================================================
      */
 }

@@ -60,51 +60,36 @@ public class ResourceNotFoundException extends RuntimeException {
 
     /*
      * =========================================================================
-     * 【ADR-011】自定义异常继承策略
+     * 【技术债务】TD-011 自定义异常
      * =========================================================================
-     * 上下文：需要为"资源不存在"场景定义业务异常，选择继承 Exception 还是
-     *         RuntimeException 影响调用方是否必须处理。
-     * 决策：继承 RuntimeException（unchecked），让 Service 方法签名保持干净，
-     *       由全局异常处理器统一收敛并映射 404。
-     * 替代方案：
-     *   A) 继承 Exception（checked）—— 每个调用方都要 try-catch 或 throws，
-     *      代码膨胀，且与全局处理器的设计理念冲突。
-     *   B) 不自定义，直接抛 IllegalArgumentException —— 语义不精确，
-     *      全局处理器无法区分"参数错误"和"资源不存在"。
-     *   C) 用一个通用 BusinessException + code 字段 —— 可行但异常类不直观，
-     *      @ExceptionHandler 无法按类型精确映射。
-     * 后果：Service 抛 ResourceNotFoundException，全局处理器自动映射 404；
-     *       新增异常类型（如 DuplicateResourceException -> 409）只需加类加 Handler。
+     *
+     * TD-011-1: 缺少更多业务异常类型
+     *   现状：只有 ResourceNotFoundException，无法区分 400/409 等语义
+     *   影响：参数校验失败、唯一约束冲突等无法精确映射状态码
+     *   优先级：P2
+     *   修复方案：加 DuplicateResourceException(409)、ValidationException(400)
+     *   预估工时：1d
+     *
+     * TD-011-2: 异常 message 缺少上下文
+     *   现状：默认 message 是"请求的资源不存在"，无具体 ID/类型信息
+     *   影响：排障时无法快速定位是哪个资源
+     *   优先级：P2
+     *   修复方案：加带 message 的构造器：new ResourceNotFoundException("用户ID=" + id + "不存在")
+     *   预估工时：0.5d
+     *
+     * TD-011-3: 无业务码字段
+     *   现状：异常只有 message，无结构化业务码
+     *   影响：前端无法根据码做差异化处理
+     *   优先级：P3
+     *   修复方案：加 code 字段，全局处理器将 code 写入 ApiResponse
+     *   预估工时：0.5d
      *
      * =========================================================================
-     * 【代码审查要点】自定义异常
+     * 【重构路线图】异常体系演进方向
      * =========================================================================
-     * [ ] 继承 RuntimeException（unchecked），不继承 Exception
-     * [ ] 提供无参构造（默认文案）和带 message 构造（动态信息）
-     * [ ] 异常名见名知义（ResourceNotFoundException > BizException）
-     * [ ] message 带上下文（"用户ID=123不存在" > "资源不存在"）
-     * [ ] 有对应 @ExceptionHandler，不会漏到 500 兜底
-     * [ ] 不在异常 message 中带 SQL/表名/堆栈（安全风险）
-     * [ ] 不每个字段一个异常类（维护成本远超收益）
-     * =========================================================================
-     */
-
-    /*
-     * =========================================================================
-     * 【ADR-011-S】异常层次设计策略（补充）
-     * =========================================================================
-     * 上下文：随着业务增长，异常类型会增多，需要合理的层次结构。
-     * 决策：按 HTTP 语义维度建异常类，不按业务字段维度。
-     *       可选中间层 BusinessException 统一标记业务异常。
-     * 推荐层次：
-     *   RuntimeException
-     *     └─ BusinessException（可选中间层，统一标记业务异常）
-     *          ├─ ResourceNotFoundException   -> 404
-     *          ├─ DuplicateResourceException   -> 409
-     *          ├─ ValidationException          -> 400
-     *          └─ OperationNotAllowedException -> 403
-     * 后果：新增异常类型只需加类加 Handler，不影响已有映射；
-     *       全局处理器可按 BusinessException 统一处理共性逻辑（如日志格式）。
+     * Phase 1（当前）：单一 ResourceNotFoundException + 默认 message
+     *   Phase 2：加 DuplicateResourceException/ValidationException + 带 message 构造器
+     * Phase 3：业务码字段 + 异常层次（BusinessException 中间层）+ 国际化 message
      * =========================================================================
      */
 }

@@ -91,58 +91,42 @@ public interface UserRepository extends JpaRepository<User, Long> {
 
 /*
  * =========================================================================
- * 【ADR-005】Spring Data JPA 派生查询策略
+ * 【技术债务】TD-005 Repository 层
  * =========================================================================
- * 上下文：Repository 层需要定义数据访问方法，可选择派生方法名、@Query JPQL、
- *         或原生 SQL 三种方式。
- * 决策：简单查询（单表、条件少）用派生方法名（findBy/existsBy/countBy），
- *       复杂查询用 @Query JPQL，原生 SQL 仅在 JPQL 无法表达时使用。
- * 替代方案：
- *   A) 全部用 @Query —— 语义清晰但简单查询也写 JPQL 增加维护量。
- *   B) 全部用原生 SQL —— 绕过 JPA 抽象，失去跨数据库能力。
- *   C) 用 Specification 动态查询 —— 适合条件组合查询，简单场景过重。
- * 后果：80% 的查询用方法名自动生成，减少手写 SQL；复杂查询集中写在 @Query 中，
- *       语义清晰可维护。派生方法名过长时自动切换到 @Query。
+ *
+ * TD-005-1: 缺少分页查询
+ *   现状：findAll() 返回全部数据，无分页
+ *   影响：数据量大时内存溢出，前端卡顿
+ *   优先级：P1
+ *   修复方案：改为 Page<User> findAll(Pageable pageable)
+ *   预估工时：0.5d
+ *
+ * TD-005-2: 缺少条件查询
+ *   现状：无法按用户名/邮箱模糊搜索
+ *   影响：管理后台无法搜索用户
+ *   优先级：P2
+ *   修复方案：加 findByUsernameContaining/Pageable 或 Specification 动态查询
+ *   预估工时：1d
+ *
+ * TD-005-3: 无软删除支持
+ *   现状：deleteById 是物理删除，数据不可恢复
+ *   影响：误删无法恢复
+ *   优先级：P3
+ *   修复方案：实体加 deleted 字段，Repository 方法加 @Where 或自定义查询
+ *   预估工时：1d
+ *
+ * TD-005-4: 缺少批量操作
+ *   现状：无 saveAll/deleteAllById 等批量方法
+ *   影响：批量导入/删除需逐条操作，性能差
+ *   优先级：P3
+ *   修复方案：继承 JpaRepository 已有 saveAll/deleteAllById，直接使用
+ *   预估工时：0.5d
  *
  * =========================================================================
- * 【代码审查要点】Repository
+ * 【重构路线图】Repository 层演进方向
  * =========================================================================
- * [ ] 查询方法名语义清晰，能推断出 SQL 语义
- * [ ] 存在性判断用 existsBy 而非 findBy（省一次实体映射）
- * [ ] 只读方法加 @Transactional(readOnly = true)
- * [ ] 分页用 Pageable，不用手写 limit/offset
- * [ ] 排序字段白名单校验，不把前端入参直接拼进 SQL
- * [ ] N+1 查询用 @EntityGraph 或 JOIN FETCH 解决
- * [ ] 批量删除用原生 SQL 或批量 API，不用循环逐条 delete
- * [ ] @Modifying 配合 @Transactional 使用
- * [ ] 派生方法名过长（>5个条件）时改用 @Query JPQL
- * =========================================================================
- */
-
-/*
- * =========================================================================
- * 【ADR-005-S】分页与N+1问题策略（补充）
- * =========================================================================
- * 上下文：列表查询需要分页，关联查询容易产生 N+1 问题。
- * 决策：分页用 Spring Data 的 Pageable；N+1 用 @EntityGraph 或 JOIN FETCH；
- *       深分页用游标分页（WHERE id < lastId）替代 OFFSET。
- * 替代方案：
- *   A) 手写 limit/offset —— 绕过 Spring Data 抽象，失去分页元信息。
- *   B) 不分页，全量返回 —— 数据量大时内存溢出，前端卡顿。
- *   C) 用 Slice 替代 Page —— 不查总数，适合"加载更多"场景。
- * 后果：Pageable 提供统一的分页抽象；深分页优化需额外处理；
- *       @EntityGraph 声明式预加载，比 JOIN FETCH 更易维护。
- *
- * N+1 检测与解决：
- *   检测：开 SQL 日志（spring.jpa.show-sql=true），看查询数是否异常
- *   解决方案一：JOIN FETCH —— JPQL 中写，一次 JOIN 查出主实体+关联
- *   解决方案二：@EntityGraph —— 声明式指定关联图，运行时自动 JOIN
- *   解决方案三：hibernate.batch_fetch_size —— 分批 IN 查询，减少 SQL 数
- *
- * 深分页优化：
- *   问题：LIMIT 100000,20 要扫描前 100020 行再丢弃，offset 越大越慢
- *   方案一：游标分页 WHERE id < lastId ORDER BY id DESC LIMIT 20
- *   方案二：延迟关联，先查主键页再 JOIN 回表取数据
- *   方案三：对超大数据集考虑搜索引擎（ES）而非关系库分页
+ * Phase 1（当前）：基本 CRUD + existsBy，无分页无搜索
+ * Phase 2：加分页 + 条件搜索 + 批量操作
+ * Phase 3：软删除 + JPA Auditing + 审计查询 + 读写分离（如需要）
  * =========================================================================
  */
