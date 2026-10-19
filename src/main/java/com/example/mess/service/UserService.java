@@ -217,78 +217,74 @@ public class UserService {
 
     /*
      * =========================================================================
-     * 【性能优化】缓存策略与并发控制（非可执行代码）
+     * 【业务安全】越权/幂等/竞态/重放防护（非可执行代码）
      * =========================================================================
      *
-     * 一、缓存命中率优化
-     *   1) 热点数据缓存：用户信息读多写少，适合 @Cacheable
-     *   2) 缓存 key 设计：单实体用 #id，列表用 'all' 或 #page+'-'+#size
-     *   3) 缓存失效：写操作后 @CacheEvict，避免脏读
-     *   4) TTL 设置：用户信息 30 分钟，列表 5 分钟，避免缓存雪崩
-     *   5) 缓存预热：启动时加载热点数据，避免首次请求穿透
+     * 一、越权防护（OWASP A01:2021）
+     *   1) 水平越权：用户 A 操作用户 B 的数据
+     *      场景：DELETE /api/users/456，但当前用户是 ID=123
+     *      防护：操作前校验资源归属（userId == currentUser.id）
+     *   2) 垂直越权：普通用户调用管理员接口
+     *      场景：普通用户直接请求 DELETE /api/users/456
+     *      防护：接口级 @PreAuthorize("hasRole('ADMIN')")
+     *   3) 参数篡改：前端隐藏 admin 字段，但请求体含 "role":"ADMIN"
+     *      防护：DTO 无 role 字段（批量赋值攻击防护）
      *
-     * 二、缓存常见问题
-     *   1) 缓存穿透：查询不存在的 key，每次都查库
-     *      解决：缓存空值（短 TTL）或布隆过滤器
-     *   2) 缓存击穿：热点 key 过期瞬间大量请求查库
-     *      解决：互斥锁（只允许一个线程查库回填）或逻辑过期
-     *   3) 缓存雪崩：大量 key 同时过期
-     *      解决：TTL 加随机偏移（30min + random(0,5min)）
+     * 二、幂等性设计（防重复提交）
+     *   1) 幂等键：客户端生成 requestId，服务端 Redis SETNX 去重
+     *      同一 requestId 的重复请求返回首次结果
+     *   2) 数据库唯一约束：username 唯一索引，重复插入抛异常
+     *   3) 乐观锁：@Version 字段，重复更新抛 OptimisticLockException
+     *   4) Token 机制：表单页生成一次性 Token，提交时校验后销毁
      *
-     * 三、并发控制
-     *   1) 乐观锁：@Version 字段，冲突时抛 OptimisticLockException
-     *   2) 悲观锁：SELECT ... FOR UPDATE，适合高并发写
-     *   3) 分布式锁：Redisson，多实例场景下保护临界区
-     *   4) 限流：Guava RateLimiter 或 Bucket4j，保护下游
+     * 三、竞态条件防护
+     *   1) 检查-操作竞态：existsBy 检查通过后另一线程已插入
+     *      防护：数据库唯一约束兜底 + catch DataIntegrityViolationException
+     *   2) 余额扣减竞态：读余额 -> 计算 -> 写回，并发下丢失更新
+     *      防护：乐观锁（@Version）或悲观锁（SELECT FOR UPDATE）
+     *   3) 库存扣减竞态：超卖问题
+     *      防护：UPDATE stock SET count = count - 1 WHERE count > 0（原子操作）
      *
-     * 四、异步化
-     *   1) @Async：非核心逻辑（通知/日志）异步执行，不阻塞主流程
-     *   2) 事件驱动：ApplicationEventPublisher + @EventListener
-     *   3) 消息队列：RocketMQ/Kafka，削峰填谷，解耦上下游
-     *
-     * =========================================================================
-     * 【监控可观测性】Service 层关键指标
-     * =========================================================================
-     *   - 缓存命中率：cache.gets{result=hit/miss}，命中率 <80% 需优化
-     *   - 方法耗时：自定义 Micrometer Timer，P99 > 500ms 告警
-     *   - 并发量：executor.active/queued（线程池指标）
-     *   - 锁等待：分布式锁等待时长，>1s 告警
-     *   - 事务回滚率：rollback/commit 比值，>5% 需排查
+     * 四、重放攻击防护
+     *   1) 时间戳 + 签名：请求带 timestamp + sign，服务端校验时间窗口（5分钟）
+     *   2) Nonce：请求带随机数，服务端 Redis 记录已用 nonce，拒绝重复
+     *   3) HTTPS：防止中间人截获请求重放
+     *   4) 接口限流：同一 IP/用户频率限制，降低重放收益
      * =========================================================================
      */
 
     /*
      * =========================================================================
-     * 【性能优化补充】JVM 调优与 GC 策略（非可执行代码）
+     * 【安全补充】API 密钥管理与密钥轮转（非可执行代码）
      * =========================================================================
      *
-     * 一、GC 选择
-     *   1) G1 GC（JDK 9+ 默认）：大堆（>4GB）表现好，停顿可控
-     *      -XX:+UseG1GC -XX:MaxGCPauseMillis=200
-     *   2) ZGC（JDK 11+ 实验，JDK 15+ 生产）：超低停顿 <1ms，适合超大堆
-     *      -XX:+UseZGC
-     *   3) Parallel GC（JDK 8 默认）：吞吐量优先，停顿长
-     *      -XX:+UseParallelGC
-     *   建议：JDK 17+ 用 G1 或 ZGC，JDK 8 用 Parallel 或 CMS（已废弃）
+     * 一、密钥分类与管理
+     *   1) 数据库密码：环境变量注入（SPRING_DATASOURCE_PASSWORD），
+     *      K8s Secret 挂载，禁止硬编码/明文配置文件
+     *   2) JWT 签名密钥：>=256 bit（HS256）或 RSA 私钥（RS256），
+     *      密钥存储：KMS（AWS KMS/阿里云 KMS）或 Vault
+     *   3) 对称加密密钥：AES-256，数据加密用，密钥与数据分离存储
+     *   4) 第三方 API 密钥：环境变量，密钥泄露监控（GitHub 扫描）
      *
-     * 二、堆内存配置
-     *   1) 容器环境：-XX:MaxRAMPercentage=70.0（自动适配容器内存限制）
-     *   2) 物理机：-Xms4g -Xmx4g（Xms=Xmx 避免动态扩缩堆）
-     *   3) 元空间：-XX:MetaspaceSize=256m -XX:MaxMetaspaceSize=512m
-     *   4) 直接内存：-XX:MaxDirectMemorySize=1g（NIO/Netty 场景）
+     * 二、密钥轮转策略
+     *   1) 定期轮转：JWT 密钥每 90 天轮转，数据库密码每 180 天
+     *   2) 平滑轮转：新旧密钥并存期（双密钥验证），旧 Token 过期后移除旧密钥
+     *      JWT 实现：kid 头标识密钥版本，验证时按 kid 选密钥
+     *   3) 紧急轮转：密钥泄露后立即轮转，吊销所有已发 Token
+     *   4) 自动化：K8s Secret 定时更新 + 滚动重启（Pod 重新读取 Secret）
      *
-     * 三、GC 日志与排障
-     *   1) 开启 GC 日志：-Xlog:gc*:file=gc.log:time,uptime,level,tags
-     *   2) 分析工具：GCViewer / GCEasy（在线） / JFR（Java Flight Recorder）
-     *   3) 关键指标：GC 频率 >1次/秒 告警；单次 GC 停顿 >500ms 告警
-     *   4) Full GC 排查：老年代不足/元空间不足/内存泄漏/System.gc() 误调
+     * 三、密钥泄露检测
+     *   1) 代码扫描：Git 历史扫描（git-secrets/truffleHog），检测提交过的密钥
+     *   2) GitHub 扫描：GitHub Secret Scanning 自动检测公开仓库中的密钥
+     *   3) 运行时检测：异常 API 调用模式（凌晨大量调用/异地调用）
+     *   4) 泄露响应：立即吊销密钥 -> 轮转 -> 排查泄露范围 -> 通知受影响用户
      *
-     * 四、内存泄漏常见场景
-     *   1) 静态集合无限增长：static Map<List> 只加不清
-     *   2) ThreadLocal 未 remove：线程池场景下 ThreadLocal 泄漏
-     *   3) 缓存无 TTL：ConcurrentHashMap 当缓存，无过期策略
-     *   4) 监听器未注销：事件监听器持有大对象引用
-     *   排查工具：jmap -histo / MAT（Memory Analyzer Tool）分析堆转储
+     * 四、密钥存储方案对比
+     *   环境变量：简单，但 ps/proc 可见，容器场景下 env 可被读取
+     *   K8s Secret：base64 编码（非加密），需配合 RBAC 和 etcd 加密
+     *   Vault（HashiCorp）：专业密钥管理，动态密钥，审计日志，访问控制
+     *   KMS（云厂商）：托管密钥，自动轮转，集成应用加密 SDK
+     *   建议：开发用环境变量，生产用 Vault 或 KMS
      * =========================================================================
      */
 }

@@ -194,41 +194,48 @@ class UserServiceTest {
 
     /*
      * =========================================================================
-     * 【性能优化】Mockito 测试性能（非可执行代码）
+     * 【安全测试】Service 层安全场景测试（非可执行代码）
      * =========================================================================
      *
-     * 一、Mockito 执行开销
-     *   1) @Mock 创建：CGLIB 生成代理类，首次约 10-50ms（类加载），
-     *      后续 @Mock 同类型约 0.1ms（类已缓存）
-     *   2) when/verify：方法拦截 + 参数匹配，约 0.01ms/次
-     *   3) 整体：一个 Mockito 单元测试约 5-20ms，100 个测试 <2s
-     *   结论：Mockito 单元测试极快，不是性能瓶颈
+     * 一、越权场景测试
+     *   1) 水平越权测试：
+     *      场景：用户 A（id=1）尝试删除用户 B（id=2）
+     *      预期：抛 AccessDeniedException 或返回失败
+     *      实现：mock currentUser(id=1)，调用 deleteUser(2L)，断言异常
+     *   2) 垂直越权测试：
+     *      场景：普通用户调用管理员方法
+     *      预期：Spring Security @PreAuthorize 拦截，403
+     *      实现：@WithMockUser(roles="USER") 调用 ADMIN 接口
      *
-     * 二、测试编写效率
-     *   1) @ExtendWith(MockitoExtension.class)：自动初始化 @Mock/@InjectMocks，
-     *      比手动 MockitoAnnotations.openMocks(this) 更简洁
-     *   2) @MockBean vs @Mock：@MockBean 属于 Spring 上下文（慢），
-     *      @Mock 属于 Mockito（快），纯单元测试用 @Mock
-     *   3) 参数化测试：@ParameterizedTest + @ValueSource/@CsvSource，
-     *      一组数据跑多场景，减少重复代码
-     *   4) 测试数据构建：Builder 模式或 TestFixture 工厂方法，
-     *      避免每个测试重复构造复杂对象
+     * 二、注入场景测试
+     *   1) SQL 注入测试：
+     *      输入：username = "alice' OR '1'='1"
+     *      预期：JPA 参数绑定，注入载荷作为普通字符串处理
+     *      验证：findByUsername("alice' OR '1'='1") 返回空，不是全表
+     *   2) XSS 测试：
+     *      输入：username = "<script>alert(1)</script>"
+     *      预期：存储原值或净化值，取决于策略
+     *      验证：查询返回的 username 不含可执行脚本（或已转义）
+     *   3) 路径穿越测试：
+     *      输入：email = "../../etc/passwd"
+     *      预期：@Email 校验拒绝，返回 400
      *
-     * 三、测试维护成本
-     *   1) 过度 mock：mock 了 10 个依赖，重构时改 10 处 -> 维护噩梦
-     *      原则：只 mock 跨越边界的依赖（DB/远程/时间）
-     *   2) 测试与实现耦合：verify 内部实现细节，重构即失败
-     *      原则：验证行为（返回值/状态变更），不验证实现（调了几次）
-     *   3) 测试数据硬编码：魔法值散落各处
-     *      原则：常量提取或 TestFixture 集中管理
+     * 三、竞态场景测试
+     *   1) 重复创建测试：
+     *      场景：两个线程同时 createUser(相同 username)
+     *      预期：一个成功，另一个被数据库唯一约束拦截
+     *      实现：CountDownLatch + ExecutorService 并发调用，
+     *      断言恰好一个成功，一个抛 DataIntegrityViolationException
+     *   2) 重复删除测试（幂等）：
+     *      场景：连续两次 deleteUser(1L)
+     *      预期：第一次成功，第二次返回成功但无副作用（幂等）
+     *      或第二次抛 ResourceNotFoundException（取决于设计）
      *
-     * =========================================================================
-     * 【监控可观测性】测试质量指标
-     * =========================================================================
-     *   - 单元测试执行时间：<2s（100 个测试）
-     *   - 测试覆盖率：JaCoCo，行覆盖 >60%，分支覆盖 >40%（参考值）
-     *   - 变异测试：PIT，检测测试的有效性（杀死变异的比例）
-     *   - 测试代码行/业务代码行：1:1 到 2:1 为健康范围
+     * 四、边界值安全测试
+     *   1) 超长输入：username = "a".repeat(10000)，预期 400
+     *   2) 空值/null：username = null / "" / "   "，预期 400
+     *   3) 特殊字符：username = "\u0000\uFFFF"，预期 400 或净化
+     *   4) Unicode 欺骗：username = "аdmin"（西里尔字母 а），预期与 "admin" 不同
      * =========================================================================
      */
 }

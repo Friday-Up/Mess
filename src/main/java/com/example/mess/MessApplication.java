@@ -41,40 +41,40 @@ public class MessApplication {
 
     /*
      * =========================================================================
-     * 【性能优化】启动性能与资源占用（非可执行代码）
+     * 【云原生部署】容器化与 K8s 部署指南（非可执行代码）
      * =========================================================================
      *
-     * 一、启动耗时优化
-     *   1) 排除无用自动配置：
-     *      @SpringBootApplication(exclude = {DataSourceAutoConfiguration.class})
-     *      减少 Bean 扫描和初始化开销
-     *   2) 懒加载：spring.main.lazy-initialization=true
-     *      Bean 用到时才初始化，启动快但首次请求慢，适合开发环境
-     *   3) 关闭 JMX：spring.jmx.enabled=false，减少 MBean 注册开销
-     *   4) 分析启动瓶颈：--debug 查看自动配置报告，
-     *      或引入 spring-boot-startup-report 插件量化各 Bean 初始化耗时
+     * 一、Docker 化要点
+     *   1) 基础镜像：eclipse-temurin:17-jre-alpine（小体积，~80MB）
+     *      避免 full JDK 镜像（~400MB），生产只需 JRE
+     *   2) 非 root 运行：USER 1000:1000，容器内不用 root，降低逃逸风险
+     *   3) 健康检查：HEALTHCHECK CMD curl -f http://localhost:8080/actuator/health
+     *   4) 资源限制：docker run --memory=512m --cpus=1，防止单容器吃光主机资源
      *
-     * 二、内存占用优化
-     *   1) JVM 参数：-Xms256m -Xmx512m 限制堆大小，避免容器 OOM
-     *   2) -XX:+UseG1GC：大堆场景下 G1 比 CMS 更稳定
-     *   3) 线程池：server.tomcat.threads.max=200 控制线程数
-     *   4) 连接池：spring.datasource.hikari.maximum-pool-size=10 控制连接数
+     * 二、K8s 部署配置
+     *   1) 健康探针：
+     *      livenessProbe: /actuator/health/liveness（进程活着？失败重启 Pod）
+     *      readinessProbe: /actuator/health/readiness（能接流量？失败摘除流量）
+     *      startupProbe: 失败阈值 30，间隔 10s（给慢启动应用时间）
+     *   2) 资源配额：
+     *      requests: cpu=250m, memory=512Mi（调度依据）
+     *      limits: cpu=1000m, memory=1Gi（硬上限，超限 OOMKill）
+     *   3) 优雅停机：
+     *      server.shutdown=graceful（接收 SIGTERM 后停止接新请求）
+     *      spring.lifecycle.timeout-per-shutdown-phase=30s
+     *      terminationGracePeriodSeconds: 30（K8s 等 30s 再强杀）
      *
-     * 三、容器化部署建议
-     *   - JVM 堆大小设为容器内存的 50%-70%
-     *   - 使用 -XX:MaxRAMPercentage=70.0 替代硬编码 -Xmx，自动适配容器内存
-     *   - Dockerfile 用多阶段构建减小镜像体积
-     *   - 健康探针：liveness=/actuator/health/liveness, readiness=/actuator/health/readiness
+     * 三、配置外部化（12-Factor App）
+     *   1) 环境变量：spring.datasource.url 从 env 注入，不打进镜像
+     *   2) ConfigMap：非敏感配置（日志级别/线程池大小）
+     *   3) Secret：敏感配置（数据库密码/JWT 密钥），base64 编码非加密
+     *   4) 配置中心：Nacos/Apollo 动态配置，免重新部署
      *
-     * =========================================================================
-     * 【监控可观测性】启动阶段的关键指标
-     * =========================================================================
-     *   - 启动耗时：application.started.time（Micrometer 指标）
-     *   - 就绪耗时：application.ready.time
-     *   - JVM 内存：jvm.memory.used/committed/max
-     *   - 线程数：jvm.threads.live/daemon/peak
-     *   - GC 次数/耗时：jvm.gc.pause（P99 耗时需关注）
-     *   接入 Micrometer + Prometheus + Grafana 可形成完整监控面板
+     * 四、镜像安全
+     *   1) 镜像扫描：Trivy/Grype 扫描 CVE 漏洞
+     *   2) 最小化镜像：distroless 或 scratch，无 shell 无包管理器
+     *   3) 镜像签名：cosign 签名，K8s 准入控制器验证签名
+     *   4) 私有仓库：Harbor，带漏洞扫描和镜像策略
      * =========================================================================
      */
 }

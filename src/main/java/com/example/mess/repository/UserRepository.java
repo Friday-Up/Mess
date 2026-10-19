@@ -91,70 +91,36 @@ public interface UserRepository extends JpaRepository<User, Long> {
 
 /*
  * =========================================================================
- * 【性能优化】查询性能优化清单（非可执行代码）
+ * 【数据访问安全】SQL 注入防护与权限边界（非可执行代码）
  * =========================================================================
  *
- * 一、索引优化
- *   1) 唯一索引：username/email 加 UNIQUE INDEX，既保唯一又加速等值查询
- *   2) 组合索引：WHERE a=? AND b=? 加 (a,b) 组合索引，遵循最左前缀
- *   3) 覆盖索引：SELECT 的字段都在索引中，免回表
- *   4) 避免索引失效：LIKE '%x%' 前导通配符不走索引；
- *      函数包裹字段 WHERE YEAR(created)=2024 不走索引
+ * 一、JPA 的 SQL 注入天然防护
+ *   派生方法（findBy/existsBy）：参数绑定（PreparedStatement），天然安全
+ *   @Query JPQL：:param 参数绑定，天然安全
+ *   @Query nativeQuery：?1 参数绑定，天然安全
+ *   不安全场景：
+ *     1) 原生 SQL 拼接：@Query("SELECT * FROM users WHERE name = '" + name + "'")
+ *        绝对禁止，用 :name 参数绑定替代
+ *     2) 排序字段拼接：PageRequest.of(0, 10, Sort.by(userInput))
+ *        userInput 可能是 "id; DROP TABLE users--"
+ *        防护：排序字段白名单校验
+ *     3) LIKE 拼接：username LIKE '%' + input + '%'
+ *        防护：LIKE CONCAT('%', :input, '%')，特殊字符转义（% _ \）
  *
- * 二、N+1 问题专项
- *   检测：spring.jpa.show-sql=true + 统计查询数
- *   场景：查 N 个用户，每个用户的关联数据懒加载触发 N 条 SQL
- *   解决方案对比：
- *     JOIN FETCH：一次 JOIN 查出，最直接，但结果集可能笛卡尔积膨胀
- *     @EntityGraph：声明式，代码侵入小，Hibernate 自动生成 LEFT JOIN
- *     batch_fetch_size：分批 IN 查询，N 条降为 N/50 条，适合批量场景
+ * 二、权限边界（行级安全）
+ *   1) 数据归属校验：查/改/删前验证资源属于当前用户
+ *      反模式：DELETE /api/users/123，不校验 123 是否属于当前用户（越权删除）
+ *      正确：先 findById(123)，校验 user.getId() == currentUser.getId()
+ *   2) IDOR（不安全的直接对象引用）：
+ *      攻击者遍历 ID（/api/users/1, /api/users/2...）获取他人数据
+ *      防护：每个查询加 currentUser 过滤条件
+ *   3) 批量操作越权：DELETE /api/users/batch，ids 列表含他人 ID
+ *      防护：批量操作前校验所有 ID 的归属
  *
- * 三、深分页专项
- *   问题：LIMIT 100000,20 扫描 100020 行丢弃前 100000 行
- *   方案一：游标分页 WHERE id < lastId ORDER BY id DESC LIMIT 20（最快）
- *   方案二：延迟关联 SELECT * FROM user WHERE id IN
- *           (SELECT id FROM user ORDER BY id LIMIT 100000,20)
- *   方案三：Slice<T> 只查 hasNext，不算 total，省去 COUNT
- *
- * =========================================================================
- * 【监控可观测性】Repository 层关键指标
- * =========================================================================
- *   - 查询耗时：hibernate.query.execution.time（P99 > 100ms 告警）
- *   - 慢查询日志：MySQL slow_query_log + pt-query-digest 分析
- *   - 连接池等待：hikaricp.connections.pending > 0 说明连接不够
- *   - 事务时长：spring.transaction.active > 5s 告警（长事务锁表）
- *   - 行锁等待：MySQL innodb_row_lock_waits 指标
- * =========================================================================
- */
-
-/*
- * =========================================================================
- * 【性能优化补充】数据库连接池与读写分离（非可执行代码）
- * =========================================================================
- *
- * 一、HikariCP 调优详解
- *   HikariCP 是 Spring Boot 默认连接池，性能最优（无锁设计）：
- *   - maximum-pool-size：10（官方建议，CPU 核数 * 2 + 磁盘数）
- *     公式：connections = (core_count * 2) + effective_spindle_count
- *   - minimum-idle：与 maximum-pool-size 相同（固定大小池，避免动态创建）
- *   - idle-timeout：600000ms（空闲连接超时，固定池时无意义）
- *   - max-lifetime：1800000ms（连接最大存活，需 < MySQL wait_timeout=28800s）
- *   - connection-timeout：30000ms（获取连接超时，超时抛 SQLTransientConnectionException）
- *   - validation-timeout：5000ms（连接活性检测超时）
- *
- * 二、读写分离
- *   1) 主从复制：MySQL binlog 复制，主写从读
- *   2) Spring 实现：AbstractRoutingDataSource 动态切换数据源
- *   3) 注解驱动：@ReadOnly -> 从库，@WriteOnly -> 主库
- *   4) 复制延迟：主从延迟 1-100ms，写后立即读需走主库（强制路由）
- *   5) 分库分表：ShardingSphere，单表 >1000 万行时考虑
- *
- * 三、SQL 优化检查清单
- *   [ ] EXPLAIN 查看执行计划，type 至少 range，避免 ALL（全表扫描）
- *   [ ] rows 扫描行数 < 表行数 10%
- *   [ ] Using filesort：排序无索引，需加排序字段索引
- *   [ ] Using temporary：临时表，需优化 GROUP BY/DISTINCT
- *   [ ] 索引选择性：COUNT(DISTINCT col)/COUNT(*) > 0.3 才值得加索引
- *   [ ] 避免 SELECT *：只查需要的字段，减少 IO 和网络传输
+ * 三、敏感查询的额外防护
+ *   1) 查询日志：敏感表查询记审计日志（谁查了什么）
+ *   2) 查询限制：单次查询结果集上限（LIMIT 1000），防全表导出
+ *   3) 慢查询监控：>1s 的查询告警，可能是攻击者在拖库
+ *   4) 数据库账号最小权限：应用账号无 DDL 权限，无跨库权限
  * =========================================================================
  */

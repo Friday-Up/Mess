@@ -148,73 +148,70 @@ public class User {
 
     /*
      * =========================================================================
-     * 【性能优化】实体与数据库交互性能（非可执行代码）
+     * 【数据安全】敏感数据保护与脱敏（非可执行代码）
      * =========================================================================
      *
-     * 一、查询性能
-     *   1) 只查需要的字段：用投影接口或 DTO 构造表达式，避免 SELECT * 拉大字段
-     *   2) 索引策略：username/email 加唯一索引，高频查询字段加普通索引
-     *   3) 分页：用 Pageable 避免全表加载，深分页用游标（WHERE id < lastId）
-     *   4) N+1 检测：开 spring.jpa.show-sql=true，查询数异常时用 JOIN FETCH
+     * 一、OWASP A02:2021 - 加密机制失效
+     *   本类涉及的用户数据需分级保护：
+     *   - 公开数据：username（可展示）
+     *   - 个人数据：email（需脱敏展示，如 a***@x.com）
+     *   - 敏感数据：password（必须加密存储，绝不明文）
+     *   - 高敏数据：身份证/手机号（需加密存储 + 脱敏展示）
      *
-     * 二、写入性能
-     *   1) 批量插入：hibernate.jdbc.batch_size=50 + saveAll()，减少往返
-     *   2) IDENTITY 策略会禁用批量插入的 JDBC batch（需逐条获取 ID），
-     *      批量场景考虑 SEQUENCE 或雪花算法
-     *   3) 只读事务：@Transactional(readOnly=true) 让 MySQL 不加行锁
-     *   4) 避免大事务：事务越长锁持有越久，并发吞吐越低
+     * 二、数据脱敏策略
+     *   1) 展示脱敏：DTO 层做，实体层保持原值
+     *      email -> a***@x.com（保留首字符和域名）
+     *      phone -> 138****5678（保留前3后4）
+     *   2) 日志脱敏：@Slf4j + 自定义 Logback MessageConverter
+     *      日志中不输出完整敏感字段
+     *   3) 数据库加密：
+     *      应用层加密：JPA AttributeConverter（AES 加解密）
+     *      数据库层加密：MySQL 透明数据加密（TDE）
+     *      传输层加密：TLS 连接数据库（jdbc:mysql://...?useSSL=true）
      *
-     * 三、连接池调优（HikariCP）
-     *   - maximum-pool-size：CPU 密集型 = 核数+1，IO 密集型 = 2*核数
-     *   - minimum-idle：与 maximum 相同避免动态创建
-     *   - connection-timeout：30000ms（获取连接超时）
-     *   - max-lifetime：1800000ms（连接最大存活，需小于数据库 wait_timeout）
+     * 三、字段级权限（行级/列级安全）
+     *   1) 列级权限：不同角色看到不同字段（如普通用户看不到 createdAt）
+     *      实现：DTO 按角色裁剪字段，或 Jackson @JsonView 分组视图
+     *   2) 行级权限：用户只能看到自己的数据
+     *      实现：Repository 查询自动加 WHERE user_id = currentUser
+     *      框架：Spring Security + Hibernate Filter
      *
-     * =========================================================================
-     * 【监控可观测性】数据库层关键指标
-     * =========================================================================
-     *   - 连接池：hikaricp.connections.active/idle/pending
-     *   - 查询耗时：hibernate.query.execution.time（需开启统计）
-     *   - 慢查询：MySQL slow_query_log，long_query_time=1s
-     *   - 事务耗时：spring.transaction.active（长事务告警）
-     *   - 死锁：MySQL SHOW ENGINE INNODB STATUS 中的 LATEST DETECTED DEADLOCK
+     * 四、数据留存与销毁
+     *   1) 软删除：deleted 标记，数据可恢复，满足审计要求
+     *   2) 硬删除：GDPR"被遗忘权"要求彻底删除用户数据
+     *   3) 留存期限：日志保留 6 个月，用户数据按法规保留
+     *   4) 匿名化：统计场景用匿名数据，不可逆推原始用户
      * =========================================================================
      */
 
     /*
      * =========================================================================
-     * 【性能优化补充】JPA 二级缓存与批量处理（非可执行代码）
+     * 【安全补充】数据合规与隐私保护（非可执行代码）
      * =========================================================================
      *
-     * 一、JPA 二级缓存（跨 Session 共享）
-     *   一级缓存：Session 级别（事务内），自动启用
-     *   二级缓存：SessionFactory 级别（跨事务），需显式配置：
-     *   1) 依赖：hibernate-ehcache 或 hibernate-jcache
-     *   2) 配置：spring.jpa.properties.hibernate.cache.use_second_level_cache=true
-     *   3) 实体标注：@Cache(usage = CacheConcurrencyStrategy.READ_WRITE)
-     *   4) 适用场景：读多写少的字典数据、配置数据
-     *   5) 不适用：频繁变更的业务数据（缓存失效成本高）
-     *   6) 分布式缓存：多实例部署时 EhCache 需复制，
-     *      或改用 Spring Cache + Redis（更通用）
+     * 一、GDPR（欧盟通用数据保护条例）
+     *   1) 合法性基础：处理个人数据需有合法依据（同意/合同/合法利益）
+     *   2) 数据主体权利：
+     *      知情权：隐私政策告知数据用途
+     *      访问权：用户可查看自己的数据（GET /api/users/me）
+     *      更正权：用户可修改自己的数据（PUT /api/users/me）
+     *      删除权（被遗忘权）：用户可要求彻底删除数据（DELETE /api/users/me）
+     *      可携带权：用户可导出自己的数据（GET /api/users/me/export）
+     *   3) 数据泄露通报：72 小时内通报监管机构
+     *   4) 罚款：最高 2000 万欧元或全球营业额 4%
      *
-     * 二、批量处理性能
-     *   1) 批量插入：saveAll() + hibernate.jdbc.batch_size=50
-     *      IDENTITY 策略禁用 JDBC batch（需逐条获取 ID）
-     *      批量场景用 SEQUENCE（Oracle/PG）或 APPLICATION（雪花算法）
-     *   2) 批量更新：@Modifying @Query("UPDATE User u SET u.status = :status")
-     *      一条 SQL 更新多行，比循环逐条快 10-100 倍
-     *   3) 批量删除：@Modifying @Query("DELETE FROM User u WHERE u.status = :status")
-     *      注意：JPQL 批量操作不触发 JPA 生命周期回调（@PreRemove 等）
-     *   4) 大批量数据迁移：分批提交（每 1000 条 flush + clear），
-     *      避免持久化上下文膨胀导致 OOM
+     * 二、个人信息保护法（PIPL，中国）
+     *   1) 单独同意：处理敏感个人信息（生物识别/医疗/金融/行踪）需单独同意
+     *   2) 最小必要：只收集实现目的所需的最少数据
+     *   3) 数据本地化：关键信息基础设施运营者收集的个人信息在境内存储
+     *   4) 跨境传输：需安全评估/认证/标准合同
      *
-     * 三、懒加载性能陷阱
-     *   1) 序列化时触发：实体转 JSON 时懒加载字段被访问，触发 N+1
-     *      解决：DTO 只包含需要的字段，或 @JsonIgnore 忽略关联
-     *   2) 事务外访问：事务结束后访问懒加载字段，抛 LazyInitializationException
-     *      解决：事务内完成所有数据访问，或 OSIV（Open Session In View）
-     *   3) OSIV 陷阱：spring.jpa.open-in-view=true（默认）延长 Session 到响应结束，
-     *      简化开发但掩盖 N+1 问题，生产环境建议关闭
+     * 三、工程实践
+     *   1) 数据分类分级：公开/内部/敏感/高敏，不同级别不同防护
+     *   2) 数据最小化：DTO 只包含必要字段，不收集/不返回多余数据
+     *   3) 目的限制：数据只用于收集时声明的目的
+     *   4) 存储限制：超过留存期限的数据自动删除（定时任务清理）
+     *   5) 隐私设计（Privacy by Design）：架构设计阶段考虑隐私，而非事后补救
      * =========================================================================
      */
 }

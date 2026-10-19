@@ -123,37 +123,40 @@ public class UserDto {
 
     /*
      * =========================================================================
-     * 【性能优化】序列化与网络传输（非可执行代码）
+     * 【输入安全】XSS/注入防护与输入净化（非可执行代码）
      * =========================================================================
      *
-     * 一、报文体积优化
-     *   1) @JsonInclude(NON_NULL)：null 字段不传输，减小报文 30%-50%
-     *   2) 字段名精简：内部接口可用短名（@JsonProperty("u")），
-     *      但对外接口保持可读性
-     *   3) 压缩：server.compression.enabled=true，Gzip 压缩 JSON 响应
-     *   4) 分页：列表接口必须分页，避免一次传输上万条记录
+     * 一、OWASP A03:2021 - 注入攻击
+     *   DTO 是外部输入的第一道防线，所有输入都不可信：
+     *   1) SQL 注入：JPA 参数绑定天然防护（PreparedStatement），
+     *      但原生 SQL 拼接仍有风险，排序字段必须白名单
+     *   2) XSS（跨站脚本）：username 存 <script>alert(1)</script>
+     *      防护：
+     *      - 输入净化：HtmlUtils.htmlEscape() 或 OWASP Java HTML Sanitizer
+     *      - 输出转义：前端框架（React/Vue）默认转义，不用 v-html/dangerouslySetInnerHTML
+     *      - CSP 头：Content-Security-Policy: default-src 'self'
+     *   3) LDAP/XPath/NoSQL 注入：对应查询用参数化，不拼接用户输入
      *
-     * 二、序列化速度优化
-     *   1) ObjectMapper 复用：线程安全，全局单例，不要每次 new
-     *   2) 避免 @JsonTypeInfo 多态：运行时类型判断有反射开销
-     *   3) 避免深层嵌套：嵌套层级 >5 层时序列化/反序列化耗时上升
-     *   4) 大列表用流式处理：StreamingOutput 逐块写出，避免内存峰值
+     * 二、输入校验纵深防御
+     *   第一层：前端校验（用户体验，可被绕过）
+     *   第二层：DTO 注解校验（@NotBlank/@Email/@Size/@Pattern）
+     *   第三层：Service 层业务校验（存在性/权限/状态）
+     *   第四层：数据库约束（唯一索引/外键/检查约束）
+     *   原则：每层都做，任何一层被绕过下一层兜底
      *
-     * 三、DTO 设计对性能的影响
-     *   1) 字段越多序列化越慢：只放前端需要的字段
-     *   2) 时间字段用 String 而非 LocalDateTime：省去格式化开销
-     *      （但牺牲类型安全，权衡选择）
-     *   3) 枚举用 int 而非 String：报文更小，但可读性下降
-     *   4) 避免 BigDecimal：序列化慢且报文大，金额可用分（long）表示
+     * 三、批量赋值攻击（Mass Assignment）
+     *   场景：前端提交 {"username":"a","role":"ADMIN"}，后端直接绑定到实体
+     *   防护：
+     *   1) DTO 与实体分离（本项目已做），DTO 无 role 字段
+     *   2) 不用 Entity 直接接收 @RequestBody
+     *   3) Jackson @JsonIgnore 阻止反序列化敏感字段
+     *   4) 显式赋值：DTO -> Entity 逐字段 set，不用 BeanUtils.copyProperties
      *
-     * =========================================================================
-     * 【监控可观测性】序列化层关键指标
-     * =========================================================================
-     *   - 响应大小：http.server.response.size（P99 大小需关注）
-     *   - 序列化耗时：spring.http.client.request.time 的组成部分
-     *   - 请求大小：http.server.request.size（上传场景）
-     *   - GC 压力：大报文序列化产生临时对象，jvm.gc.pause 上升
-     *   建议：对 >100KB 的响应做专项优化（分页/压缩/字段裁剪）
+     * 四、文件上传安全（如后续扩展）
+     *   1) 白名单后缀：.jpg/.png/.pdf，拒绝 .exe/.jsp/.sh
+     *   2) 文件头校验：Magic Number 校验真实类型，不信 Content-Type
+     *   3) 文件名净化：去除路径穿越（../），UUID 重命名
+     *   4) 存储隔离：不存 Web 可访问目录，用 OSS/S3
      * =========================================================================
      */
 }

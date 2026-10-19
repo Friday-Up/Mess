@@ -173,82 +173,93 @@ public class UserController {
 
     /*
      * =========================================================================
-     * 【性能优化】接口性能优化清单（非可执行代码）
+     * 【OWASP Top 10 映射】Controller 层安全检查表（非可执行代码）
      * =========================================================================
      *
-     * 一、响应速度优化
-     *   1) 分页：列表接口必须分页，Pageable + Page<T>
-     *   2) 字段裁剪：只返回前端需要的字段，用投影或 DTO
-     *   3) 压缩：server.compression.enabled=true，Gzip 压缩 JSON
-     *   4) HTTP 缓存：Cache-Control + ETag，静态数据 304 免传输
-     *   5) CDN：静态资源走 CDN，API 走源站
+     * A01:2021 失效的访问控制
+     *   [ ] 每个接口有明确的权限要求（permitAll/authenticated/hasRole）
+     *   [ ] 资源操作前校验归属（防水平越权）
+     *   [ ] 管理接口有 ADMIN 角色要求（防垂直越权）
+     *   [ ] CORS 显式配置，不用 *
      *
-     * 二、并发处理优化
-     *   1) 线程池：server.tomcat.threads.max=200（默认 200），IO 密集型可调高
-     *   2) 异步接口：@Async + CompletableFuture 返回，耗时操作不阻塞
-     *   3) 响应式：WebFlux 替代 MVC，背压控制，高并发场景吞吐更高
-     *   4) 限流：Bucket4j 按 IP/用户限流，防止恶意刷接口
+     * A02:2021 加密机制失效
+     *   [ ] 强制 HTTPS（HTTP 自动跳转 HTTPS）
+     *   [ ] 敏感字段（password）不返回前端
+     *   [ ] JWT/Session 用安全 Cookie（HttpOnly + Secure + SameSite）
      *
-     * 三、请求处理优化
-     *   1) 参数校验前置：@Valid 在 Controller 层拦截，避免无效请求进 Service
-     *   2) 幂等设计：POST 接口加幂等键，防止重复提交
-     *   3) 批量接口：/api/users/batch 一次处理多条，减少 HTTP 往返
-     *   4) 请求合并：Hystrix Collapser 或自研合并器，短时间多次请求合并
+     * A03:2021 注入
+     *   [ ] @RequestBody 反序列化用 DTO，不用 Map/Object
+     *   [ ] 排序/搜索参数白名单校验
+     *   [ ] 不拼接 SQL/命令/LDAP 查询
      *
-     * 四、超时与熔断
-     *   1) 连接超时：server.connection-timeout=5s
-     *   2) 读超时：下游调用设置 read-timeout，避免线程阻塞
-     *   3) 熔断：Resilience4j CircuitBreaker，错误率 >50% 熔断 10s
-     *   4) 降级：熔断时返回兜底数据，保证核心功能可用
+     * A04:2021 不安全设计
+     *   [ ] 创建/删除接口幂等设计
+     *   [ ] 敏感操作有二次确认（如删除用户需确认密码）
+     *   [ ] 接口有速率限制（防暴力枚举/CC 攻击）
      *
-     * =========================================================================
-     * 【监控可观测性】接口层关键指标
-     * =========================================================================
-     *   - QPS：http.server.requests{uri=/api/users} 的 count/second
-     *   - P99 延迟：http.server.requests 的 percentile，>1s 告警
-     *   - 错误率：5xx/total，>1% 告警；4xx/total 关注但不告警
-     *   - Tomcat 线程：server.tomcat.threads.busy/current，busy 接近 max 告警
-     *   - 请求队列：tomcat.threads.busy 持续高位说明线程不够或下游慢
-     *   接入：Micrometer + Prometheus + Grafana，Alertmanager 告警
+     * A05:2021 安全配置错误
+     *   [ ] 错误响应不泄露堆栈/表名/SQL
+     *   [ ] 生产环境关闭 actuator 敏感端点（env/heapdump/beans）
+     *   [ ] 不使用默认凭证（admin/admin）
+     *
+     * A07:2021 身份识别和认证失效
+     *   [ ] 登录失败不提示具体原因（"用户名或密码错误"而非"密码错误"）
+     *   [ ] 连续失败锁定（5次失败锁15分钟）
+     *   [ ] 密码强度策略（长度>=8，含大小写/数字/特殊字符）
+     *   [ ] 会话超时（30分钟无操作自动登出）
+     *
+     * A08:2021 软件和数据完整性故障
+     *   [ ] 依赖定期扫描 CVE（OWASP Dependency-Check / Snyk）
+     *   [ ] 反序列化用白名单（Jackson default typing 禁用）
+     *
+     * A09:2021 安全日志和监控失效
+     *   [ ] 登录成功/失败记审计日志
+     *   [ ] 敏感操作（删除/权限变更）记审计日志
+     *   [ ] 异常请求（403/429）触发告警
      * =========================================================================
      */
 
     /*
      * =========================================================================
-     * 【性能优化补充】Tomcat 与线程池调优（非可执行代码）
+     * 【安全补充】API 网关与边缘安全（非可执行代码）
      * =========================================================================
      *
-     * 一、Tomcat 线程模型
-     *   每个请求分配一个线程（BIO/NIO），线程从线程池获取：
-     *   - server.tomcat.threads.min-spare=10（最小空闲线程）
-     *   - server.tomcat.threads.max=200（最大线程数，IO 密集型可调高）
-     *   - server.tomcat.accept-count=100（等待队列长度）
-     *   - server.tomcat.max-connections=8191（最大连接数）
+     * 一、API 网关安全职责
+     *   网关层（Spring Cloud Gateway / Nginx / Kong / APISIX）：
+     *   1) SSL 终止：HTTPS 在网关解密，后端 HTTP，减少后端 CPU 开销
+     *   2) 认证前置：网关统一验证 JWT，后端免认证（信任网关头）
+     *      注意：后端需校验请求确实来自网关（内网 IP 白名单/mTLS）
+     *   3) 限流：网关限流（令牌桶/滑动窗口），保护后端
+     *   4) WAF：网关集成 WAF，拦截 SQL 注入/XSS/CC 攻击
+     *   5) 熔断：网关熔断，后端故障时返回降级响应
      *
-     * 二、线程池调优策略
-     *   1) CPU 密集型：threads.max = CPU 核数 + 1
-     *   2) IO 密集型：threads.max = CPU 核数 * 2 ~ 4（视 IO 等待比例）
-     *   3) 混合型：拆分线程池，CPU 任务和 IO 任务分开
-     *   4) 线程数不是越大越好：线程多 -> 上下文切换开销大 -> 吞吐反而下降
+     * 二、WAF 规则
+     *   1) OWASP Core Rule Set（CRS）：ModSecurity 规则集
+     *      检测：SQL 注入/XSS/路径穿越/远程代码执行/文件包含
+     *   2) 自定义规则：
+     *      封禁已知攻击 IP（威胁情报）
+     *      限制异常 UA（扫描器/爬虫特征）
+     *      限制异常请求频率（CC 攻击）
+     *   3) 模式：检测模式（只记日志）-> 阻断模式（拦截请求）
+     *      建议先检测模式运行 1-2 周，调优误报后切阻断
      *
-     * 三、连接超时配置
-     *   - server.connection-timeout=5s：建立连接超时
-     *   - server.keep-alive-timeout=60s：Keep-Alive 空闲超时
-     *   - server.max-keep-alive-requests=100：单连接最大请求数
-     *   - spring.mvc.async.request-timeout=30s：异步请求超时
+     * 三、DDoS 防护
+     *   1) L3/L4 DDoS（网络层）：云厂商防护（AWS Shield/阿里云 DDoS 防护）
+     *   2) L7 DDoS（应用层 CC）：网关限流 + WAF + 验证码挑战
+     *   3) 速率限制策略：
+     *      全局：10000 req/s（超过触发限流页）
+     *      单 IP：100 req/s（超过返回 429）
+     *      单用户：10 req/s（超过返回 429）
+     *      登录接口：10 req/min/IP（防暴力破解）
+     *   4) CDN 静态资源：静态资源走 CDN，源站只处理 API，减少源站压力
      *
-     * 四、背压与限流
-     *   1) 接受队列满时：Tomcat 拒绝新连接（Connection refused）
-     *   2) 自定义限流：Bucket4j 按 IP/用户/接口限流
-     *      - 每 IP 100 req/s，每用户 10 req/s，每接口 1000 req/s
-     *   3) 网关限流：Spring Cloud Gateway + Redis 限流过滤器
-     *   4) 自适应限流：根据系统负载动态调整限流阈值（如 Sentinel）
-     *
-     * 五、压测与容量规划
-     *   1) 压测工具：JMeter / wrk / Gatling
-     *   2) 关键指标：QPS / P99 延迟 / 错误率 / CPU / 内存
-     *   3) 容量公式：单实例 QPS * 实例数 = 总容量（留 30% 余量）
-     *   4) 压测环境与生产环境配置一致，否则数据无意义
+     * 四、零信任架构（Zero Trust）
+     *   原则：永不信任，始终验证（Never Trust, Always Verify）
+     *   1) 不信任内网：服务间调用也需认证（mTLS/Service Token）
+     *   2) 最小权限：每个服务只授予所需最小权限
+     *   3) 持续验证：每次请求都验证，不依赖网络位置
+     *   4) 微隔离：服务间网络隔离，只开放必要端口
+     *   5) 实现：服务网格（Istio）自动 mTLS + 策略执行
      * =========================================================================
      */
 }

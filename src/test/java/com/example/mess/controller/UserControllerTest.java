@@ -220,39 +220,49 @@ class UserControllerTest {
 
     /*
      * =========================================================================
-     * 【性能优化】MockMvc 测试性能（非可执行代码）
+     * 【安全测试】API 安全测试场景（非可执行代码）
      * =========================================================================
      *
-     * 一、MockMvc 执行开销
-     *   1) standaloneSetup：不启动 Spring 上下文，每个测试约 5-10ms
-     *   2) @WebMvcTest：启动 Web 切片上下文，首次约 2-5s，后续共享约 10ms
-     *   3) @SpringBootTest + MockMvc：启动完整上下文，首次约 10-30s
-     *   结论：standaloneSetup 最快，适合高频运行的单元测试
+     * 一、认证测试矩阵
+     *   场景                          预期状态码   预期 message
+     *   无 Token 请求受保护接口         401        未认证
+     *   无效 Token 请求受保护接口        401        未认证
+     *   过期 Token 请求受保护接口        401        未认证
+     *   篡改 Token（改 payload）请求     401        未认证
+     *   有效 Token 请求受保护接口        200        正常响应
+     *   注意：401 message 统一"未认证"，不区分 Token 类型
      *
-     * 二、MockMvc 性能注意
-     *   1) 上下文缓存：@WebMvcTest 相同配置的测试类共享上下文，
-     *      避免每个测试类都重新启动
-     *   2) @DirtiesContext 破坏缓存：标记后上下文不复用，慎用
-     *   3) MockBean 影响缓存：不同 @MockBean 组合导致上下文不共享
-     *      尽量统一 @MockBean 配置，让上下文复用
-     *   4) JSON 序列化开销：每次 perform 都序列化/反序列化，约 0.5-2ms
+     * 二、授权测试矩阵
+     *   场景                          预期状态码
+     *   USER 角色访问 GET /api/users    200（有权限）
+     *   USER 角色访问 DELETE /api/users/1  403（无权限，需 ADMIN）
+     *   ADMIN 角色访问所有接口           200
+     *   用户 A 访问用户 B 的数据         404（不泄露存在性）
+     *   测试工具：@WithMockUser(username="a", roles="USER")
+     *   或 MockMvcRequestPostProcessors.httpBasic("user", "password")
      *
-     * 三、测试编写效率
-     *   1) 请求模板：抽取公共方法 buildGetRequest(url)/buildPostRequest(url, body)，
-     *      减少重复代码
-     *   2) 断言工具：jsonPath 断言链式调用，比手动解析 JSON 字符串高效
-     *   3) 测试数据：ObjectMapper.writeValueAsString(dto) 序列化 DTO 作为请求体，
-     *      比手写 JSON 字符串更安全（字段名变更自动同步）
-     *   4) 集中配置：@BeforeAll 中初始化共享 MockMvc/ObjectMapper，
-     *      避免每个测试重复创建
+     * 三、输入校验安全测试
+     *   1) 缺少必填字段：POST /api/users body={"email":"a@x.com"}（无 username）
+     *      预期：400，message 含"username 不能为空"
+     *   2) 格式错误：POST /api/users body={"username":"a","email":"not-email"}
+     *      预期：400，@Email 校验失败
+     *   3) 超长字段：POST /api/users body={"username":"a".repeat(100),...}
+     *      预期：400，@Size(max=50) 校验失败
+     *   4) 类型错误：POST /api/users body={"username":12345}
+     *      预期：400，JSON 反序列化失败
      *
-     * =========================================================================
-     * 【监控可观测性】Web 测试质量指标
-     * =========================================================================
-     *   - Web 层测试覆盖率：Controller 方法的覆盖比例
-     *   - HTTP 状态码矩阵：每个接口 x 每种场景 -> 预期状态码的映射表
-     *   - 契约测试：Pact/Spring Cloud Contract，验证前后端契约
-     *   - 响应结构稳定性：JSON Schema 校验，字段变更时测试自动失败
+     * 四、CSRF 测试
+     *   1) CSRF 启用时：POST 无 CSRF Token -> 403
+     *   2) CSRF 启用时：POST 带正确 CSRF Token -> 200
+     *   3) CSRF 启用时：POST 带错误 CSRF Token -> 403
+     *   4) 本项目禁用 CSRF（Token 认证），以上测试不适用
+     *      若恢复 CSRF，需全部补测
+     *   5) CSRF Token 测试：.with(csrf()) 自动生成有效 Token
+     *
+     * 五、速率限制测试
+     *   1) 连续请求 100 次，预期前 N 次成功，之后 429
+     *   2) 429 响应含 Retry-After 头
+     *   3) 不同 IP 的限流互不影响
      * =========================================================================
      */
 }

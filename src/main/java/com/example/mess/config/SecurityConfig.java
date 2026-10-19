@@ -143,70 +143,90 @@ public class SecurityConfig {
 
     /*
      * =========================================================================
-     * 【性能优化】安全过滤器链性能（非可执行代码）
+     * 【认证安全】OWASP A07 身份识别和认证失效防护（非可执行代码）
      * =========================================================================
      *
-     * 一、过滤器链开销分析
-     *   每个请求穿过 SecurityFilterChain，开销约 0.1-0.5ms（无认证时）。
-     *   认证（查数据库/验证 Token）是主要开销，可达 5-20ms。
+     * 一、密码安全生命周期
+     *   1) 存储：BCrypt（cost>=10），绝不明文/MD5/SHA1
+     *   2) 传输：HTTPS 加密传输，登录页强制 HTTPS
+     *   3) 重置：Token 一次性 + 短 TTL（15分钟），Token 哈希存储
+     *   4) 修改：需验证旧密码
+     *   5) 强度：>=8位，含大小写/数字/特殊字符，检查弱密码字典（top10000）
+     *   6) 过期：90天强制修改（视业务，有争议，NIST 建议不强制定期换）
      *
-     * 二、认证性能优化
-     *   1) JWT 无状态认证：Token 自包含用户信息，免查数据库验证
-     *   2) Token 缓存：解析后的 Authentication 缓存到 SecurityContext
-     *   3) 密码编码：BCrypt cost factor=10 约 100ms，只在登录时执行一次
-     *      后续请求用 Token/Session 免重复编码
-     *   4) 批量登录：限制登录接口 QPS，防暴力破解消耗 CPU（BCrypt 是 CPU 密集型）
+     * 二、会话/Token 安全
+     *   Session 方案：
+     *   [ ] Session ID 用 SecureRandom 生成，足够长（>=128 bit）
+     *   [ ] Cookie 标志：HttpOnly（防 XSS 窃取）+ Secure（仅 HTTPS）+ SameSite=Lax/Strict（防 CSRF）
+     *   [ ] Session 超时：30分钟无操作失效
+     *   [ ] 登录后重新生成 Session ID（防 Session Fixation）
+     *   [ ] 登出时销毁 Session（invalidate()）
+     *   JWT 方案：
+     *   [ ] 密钥强度：>=256 bit，密钥轮转（kid 头标识版本）
+     *   [ ] 算法：HS256 或 RS256，禁用 none 算法
+     *   [ ] Payload 最小化：不放敏感数据（密码/手机号），JWT 可被解码
+     *   [ ] TTL 短：Access Token 15分钟 + Refresh Token 7天
+     *   [ ] Refresh Token 一次性使用，用后轮转
+     *   [ ] 黑名单：登出/改密后 Token 加入 Redis 黑名单
      *
-     * 三、授权性能优化
-     *   1) 规则顺序：高频放行的规则放前面（如 /api/public/** permitAll）
-     *   2) 规则精确：用 requestMatchers 精确匹配，避免 anyRequest 兜底过多
-     *   3) 角色缓存：用户角色信息缓存，避免每次请求查数据库
-     *   4) 方法级安全：@PreAuthorize 有 AOP 开销，高频接口考虑 URL 级授权
+     * 三、暴力破解防护
+     *   1) 失败计数：5 次失败锁定 15 分钟（账号维度 + IP 维度）
+     *   2) 验证码：3 次失败后要求图形验证码/滑块
+     *   3) 限流：登录接口限流（10 req/min/IP）
+     *   4) 告警：连续失败触发安全告警
+     *   5) 延迟响应：失败后 sleep(1s)，增加暴力破解成本
      *
-     * 四、Session 性能
-     *   1) 无状态：sessionCreationPolicy(STATELESS)，不创建 Session
-     *   2) Session 共享：多实例部署用 Spring Session + Redis
-     *   3) Session 超时：server.servlet.session.timeout=30m，避免内存泄漏
-     *
-     * =========================================================================
-     * 【监控可观测性】安全层关键指标
-     * =========================================================================
-     *   - 认证失败率：401/total，>10% 可能被攻击
-     *   - 授权拒绝率：403/total，突增可能权限配置错误
-     *   - 登录 QPS：/api/auth/login 的 count/second，突增可能是撞库
-     *   - BCrypt 耗时：登录接口 P99 > 500ms 正常（BCrypt 本身慢）
-     *   - Session 存活数：spring.session.active（内存/Redis 中）
-     *   安全告警：连续 5 次登录失败锁定 IP，发送告警通知
+     * 四、多因素认证（MFA）
+     *   1) 短信验证码：二次验证（SMS OTP）
+     *   2) TOTP：Google Authenticator（时间基一次性密码）
+     *   3) WebAuthn：硬件密钥/指纹（最强）
+     *   4) 适用场景：管理员账户/敏感操作/金融场景
      * =========================================================================
      */
 
     /*
      * =========================================================================
-     * 【性能优化补充】分布式安全架构性能（非可执行代码）
+     * 【安全补充】CSRF/SSRF/点击劫持防护（非可执行代码）
      * =========================================================================
      *
-     * 一、多实例部署的安全性能
-     *   1) Session 共享：Spring Session + Redis，避免 Session 粘滞
-     *      开销：每次请求读写 Redis，约 1-3ms
-     *   2) JWT 无状态：Token 自包含，免服务端存储，约 0.5ms（签名验证）
-     *   3) Token 黑名单：JWT 本身无法主动失效，需 Redis 黑名单
-     *      开销：每次请求查 Redis，约 1ms
-     *   4) 建议：高并发场景用 JWT + 短 TTL + Refresh Token，
-     *      避免 Session 共享的 Redis 瓶颈
+     * 一、CSRF（跨站请求伪造）- OWASP A01
+     *   原理：用户已登录 A 站，访问恶意 B 站，B 站自动向 A 站发请求（带 Cookie）
+     *   防护：
+     *   1) Token 方案：服务端生成 CSRF Token，前端表单携带，服务端校验
+     *   2) SameSite Cookie：SameSite=Lax/Strict，跨站请求不带 Cookie
+     *   3) 验证 Origin/Referer：检查请求来源是否本站
+     *   4) 本项目禁用 CSRF 的理由：走 Token 认证（非 Cookie），CSRF 不适用
+     *      若恢复 Cookie 认证，必须重新启用 CSRF
      *
-     * 二、网关层安全性能
-     *   1) 认证前置：网关统一认证，后端服务免认证开销
-     *   2) 限流前置：网关限流，保护后端不被打挂
-     *   3) WAF：Web 应用防火墙，拦截 SQL 注入/XSS/CC 攻击
-     *   4) SSL 卸载：网关终止 TLS，后端 HTTP，减少后端 CPU 开销
-     *      TLS 握手约 10-50ms（RSA 2048），卸载后后端免开销
+     * 二、SSRF（服务端请求伪造）
+     *   原理：攻击者让服务端向内网发起请求（如请求元数据服务 169.254.169.254）
+     *   场景：用户输入 URL，服务端去请求（如"图片代理"/"URL 预览"功能）
+     *   防护：
+     *   1) URL 白名单：只允许 http/https，只允许特定域名
+     *   2) 禁止内网：解析 DNS 后校验 IP 不在私有网段（10.x/172.16.x/192.168.x/127.x）
+     *   3) 禁止重定向：跟随重定向后再次校验目标 IP
+     *   4) 云元数据：禁止 169.254.169.254（AWS/GCP 元数据接口）
      *
-     * 三、密码相关性能
-     *   1) BCrypt cost factor：10 约 100ms，12 约 400ms
-     *      登录是低频操作，100ms 可接受；注册同理
-     *   2) 暴力破解防护：登录限流（5次/分钟/IP），
-     *      失败锁定（5次失败锁15分钟），验证码（3次失败后）
-     *   3) 密码重置：Token 一次性 + 短 TTL（15分钟），防重放
+     * 三、点击劫持（Clickjacking）
+     *   原理：恶意网站用 iframe 嵌入目标网站，用户点击被劫持
+     *   防护：
+     *   1) X-Frame-Options: DENY（禁止 iframe 嵌入）
+     *      Spring Security: .headers().frameOptions().deny()
+     *   2) CSP frame-ancestors: 'none'（更现代的替代方案）
+     *   3) JavaScript 防护：if (window.top !== window.self) window.top.location = window.self.location
+     *
+     * 四、安全响应头完整清单
+     *   X-Content-Type-Options: nosniff（禁止 MIME 嗅探）
+     *   X-Frame-Options: DENY（防点击劫持）
+     *   X-XSS-Protection: 1; mode=block（旧版浏览器 XSS 过滤）
+     *   Content-Security-Policy: default-src 'self'（CSP，最强 XSS 防护）
+     *   Strict-Transport-Security: max-age=31536000; includeSubDomains（强制 HTTPS）
+     *   Referrer-Policy: strict-origin-when-cross-origin（控制 Referrer 泄露）
+     *   Permissions-Policy: camera=(), microphone=(), geolocation=()（禁用敏感 API）
+     *   Spring Security 配置：
+     *   .headers().contentTypeOptions().frameOptions().xssProtection()
+     *              .httpStrictTransportSecurity().referrerPolicy()
+     *              .permissionsPolicy()
      * =========================================================================
      */
 }
