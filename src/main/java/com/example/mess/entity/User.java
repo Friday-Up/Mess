@@ -148,71 +148,73 @@ public class User {
 
     /*
      * =========================================================================
-     * 【技术债务】TD-002 实体层
+     * 【性能优化】实体与数据库交互性能（非可执行代码）
      * =========================================================================
      *
-     * TD-002-1: 缺少 updatedAt 字段
-     *   现状：只有 createdAt，无法追踪最后修改时间
-     *   影响：审计和排障时无法知道记录何时被修改
-     *   优先级：P2
-     *   修复方案：加 updatedAt 字段 + @PreUpdate 回调自动维护
-     *   预估工时：0.5d
+     * 一、查询性能
+     *   1) 只查需要的字段：用投影接口或 DTO 构造表达式，避免 SELECT * 拉大字段
+     *   2) 索引策略：username/email 加唯一索引，高频查询字段加普通索引
+     *   3) 分页：用 Pageable 避免全表加载，深分页用游标（WHERE id < lastId）
+     *   4) N+1 检测：开 spring.jpa.show-sql=true，查询数异常时用 JOIN FETCH
      *
-     * TD-002-2: 缺少乐观锁
-     *   现状：并发更新时后写覆盖先写，无检测
-     *   影响：管理后台同时编辑同一用户时数据丢失
-     *   优先级：P3（当前并发量低）
-     *   修复方案：加 @Version 字段，更新时 WHERE version = ?
-     *   预估工时：0.5d
+     * 二、写入性能
+     *   1) 批量插入：hibernate.jdbc.batch_size=50 + saveAll()，减少往返
+     *   2) IDENTITY 策略会禁用批量插入的 JDBC batch（需逐条获取 ID），
+     *      批量场景考虑 SEQUENCE 或雪花算法
+     *   3) 只读事务：@Transactional(readOnly=true) 让 MySQL 不加行锁
+     *   4) 避免大事务：事务越长锁持有越久，并发吞吐越低
      *
-     * TD-002-3: 缺少软删除
-     *   现状：删除是物理删除（DELETE），数据不可恢复
-     *   影响：误删无法恢复，审计缺失
-     *   优先级：P3
-     *   修复方案：加 deleted 字段 + @Where(clause="deleted=false") + Repository 方法调整
-     *   预估工时：1d
-     *
-     * TD-002-4: 无 JPA Auditing
-     *   现状：createdAt 手动赋值，updatedAt 缺失
-     *   影响：每个创建逻辑都要手动设时间，易遗漏
-     *   优先级：P2
-     *   修复方案：启用 @CreatedDate/@LastModifiedDate + @EntityListeners(AuditingEntityListener)
-     *   预估工时：0.5d
+     * 三、连接池调优（HikariCP）
+     *   - maximum-pool-size：CPU 密集型 = 核数+1，IO 密集型 = 2*核数
+     *   - minimum-idle：与 maximum 相同避免动态创建
+     *   - connection-timeout：30000ms（获取连接超时）
+     *   - max-lifetime：1800000ms（连接最大存活，需小于数据库 wait_timeout）
      *
      * =========================================================================
-     * 【重构路线图】实体层演进方向
+     * 【监控可观测性】数据库层关键指标
      * =========================================================================
-     * Phase 1（当前）：基本字段 + 手动时间赋值 + 物理删除
-     * Phase 2：加 updatedAt + JPA Auditing + 乐观锁
-     * Phase 3：软删除 + 审计字段（createdBy/updatedBy）+ 领域事件
+     *   - 连接池：hikaricp.connections.active/idle/pending
+     *   - 查询耗时：hibernate.query.execution.time（需开启统计）
+     *   - 慢查询：MySQL slow_query_log，long_query_time=1s
+     *   - 事务耗时：spring.transaction.active（长事务告警）
+     *   - 死锁：MySQL SHOW ENGINE INNODB STATUS 中的 LATEST DETECTED DEADLOCK
      * =========================================================================
      */
 
     /*
      * =========================================================================
-     * 【技术债务】TD-002-S 实体层补充
+     * 【性能优化补充】JPA 二级缓存与批量处理（非可执行代码）
      * =========================================================================
      *
-     * TD-002-5: 缺少状态字段
-     *   现状：无用户状态（启用/禁用）
-     *   影响：无法禁用用户而不删除数据
-     *   优先级：P2
-     *   修复方案：加 status 字段（ENABLED/DISABLED），查询时过滤
-     *   预估工时：0.5d
+     * 一、JPA 二级缓存（跨 Session 共享）
+     *   一级缓存：Session 级别（事务内），自动启用
+     *   二级缓存：SessionFactory 级别（跨事务），需显式配置：
+     *   1) 依赖：hibernate-ehcache 或 hibernate-jcache
+     *   2) 配置：spring.jpa.properties.hibernate.cache.use_second_level_cache=true
+     *   3) 实体标注：@Cache(usage = CacheConcurrencyStrategy.READ_WRITE)
+     *   4) 适用场景：读多写少的字典数据、配置数据
+     *   5) 不适用：频繁变更的业务数据（缓存失效成本高）
+     *   6) 分布式缓存：多实例部署时 EhCache 需复制，
+     *      或改用 Spring Cache + Redis（更通用）
      *
-     * TD-002-6: 缺少角色/权限字段
-     *   现状：无用户角色，Security 配置硬编码
-     *   影响：无法动态分配权限
-     *   优先级：P2
-     *   修复方案：加 roles 字段（多对多关系或 JSON 数组），Security 动态鉴权
-     *   预估工时：2d
+     * 二、批量处理性能
+     *   1) 批量插入：saveAll() + hibernate.jdbc.batch_size=50
+     *      IDENTITY 策略禁用 JDBC batch（需逐条获取 ID）
+     *      批量场景用 SEQUENCE（Oracle/PG）或 APPLICATION（雪花算法）
+     *   2) 批量更新：@Modifying @Query("UPDATE User u SET u.status = :status")
+     *      一条 SQL 更新多行，比循环逐条快 10-100 倍
+     *   3) 批量删除：@Modifying @Query("DELETE FROM User u WHERE u.status = :status")
+     *      注意：JPQL 批量操作不触发 JPA 生命周期回调（@PreRemove 等）
+     *   4) 大批量数据迁移：分批提交（每 1000 条 flush + clear），
+     *      避免持久化上下文膨胀导致 OOM
      *
-     * TD-002-7: 密码字段缺失
-     *   现状：User 实体无 password 字段
-     *   影响：无法存储认证凭证
-     *   优先级：P1
-     *   修复方案：加 password 字段 + BCrypt 加密存储，DTO 中排除
-     *   预估工时：1d
+     * 三、懒加载性能陷阱
+     *   1) 序列化时触发：实体转 JSON 时懒加载字段被访问，触发 N+1
+     *      解决：DTO 只包含需要的字段，或 @JsonIgnore 忽略关联
+     *   2) 事务外访问：事务结束后访问懒加载字段，抛 LazyInitializationException
+     *      解决：事务内完成所有数据访问，或 OSIV（Open Session In View）
+     *   3) OSIV 陷阱：spring.jpa.open-in-view=true（默认）延长 Session 到响应结束，
+     *      简化开发但掩盖 N+1 问题，生产环境建议关闭
      * =========================================================================
      */
 }

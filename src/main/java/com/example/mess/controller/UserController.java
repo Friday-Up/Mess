@@ -173,85 +173,82 @@ public class UserController {
 
     /*
      * =========================================================================
-     * 【技术债务】TD-007 Controller 层
+     * 【性能优化】接口性能优化清单（非可执行代码）
      * =========================================================================
      *
-     * TD-007-1: 缺少更新接口
-     *   现状：只有 GET/POST/DELETE，无 PUT/PATCH
-     *   影响：无法修改用户信息
-     *   优先级：P1
-     *   修复方案：加 PUT /api/users/{id} + updateUser
-     *   预估工时：1d
+     * 一、响应速度优化
+     *   1) 分页：列表接口必须分页，Pageable + Page<T>
+     *   2) 字段裁剪：只返回前端需要的字段，用投影或 DTO
+     *   3) 压缩：server.compression.enabled=true，Gzip 压缩 JSON
+     *   4) HTTP 缓存：Cache-Control + ETag，静态数据 304 免传输
+     *   5) CDN：静态资源走 CDN，API 走源站
      *
-     * TD-007-2: 缺少输入校验
-     *   现状：@RequestBody 参数无 @Valid
-     *   影响：非法输入直达 Service 层
-     *   优先级：P1
-     *   修复方案：DTO 加校验注解 + Controller 加 @Valid
-     *   预估工时：0.5d
+     * 二、并发处理优化
+     *   1) 线程池：server.tomcat.threads.max=200（默认 200），IO 密集型可调高
+     *   2) 异步接口：@Async + CompletableFuture 返回，耗时操作不阻塞
+     *   3) 响应式：WebFlux 替代 MVC，背压控制，高并发场景吞吐更高
+     *   4) 限流：Bucket4j 按 IP/用户限流，防止恶意刷接口
      *
-     * TD-007-3: 缺少接口文档
-     *   现状：无 Swagger/OpenAPI 文档
-     *   影响：前端联调靠口头沟通，效率低
-     *   优先级：P2
-     *   修复方案：引入 springdoc-openapi，加 @Operation/@Schema 注解
-     *   预估工时：1d
+     * 三、请求处理优化
+     *   1) 参数校验前置：@Valid 在 Controller 层拦截，避免无效请求进 Service
+     *   2) 幂等设计：POST 接口加幂等键，防止重复提交
+     *   3) 批量接口：/api/users/batch 一次处理多条，减少 HTTP 往返
+     *   4) 请求合并：Hystrix Collapser 或自研合并器，短时间多次请求合并
      *
-     * TD-007-4: 创建接口未返回 201
-     *   现状：POST 创建返回 200
-     *   影响：不完全符合 RESTful 语义
-     *   优先级：P3
-     *   修复方案：返回 ResponseEntity.status(201).body(ApiResponse.success(user))
-     *   预估工时：0.5d
-     *
-     * TD-007-5: 缺少分页参数
-     *   现状：GET /api/users 返回全部数据
-     *   影响：数据量大时性能问题
-     *   优先级：P1
-     *   修复方案：加 @RequestParam Pageable 参数
-     *   预估工时：0.5d
+     * 四、超时与熔断
+     *   1) 连接超时：server.connection-timeout=5s
+     *   2) 读超时：下游调用设置 read-timeout，避免线程阻塞
+     *   3) 熔断：Resilience4j CircuitBreaker，错误率 >50% 熔断 10s
+     *   4) 降级：熔断时返回兜底数据，保证核心功能可用
      *
      * =========================================================================
-     * 【重构路线图】Controller 层演进方向
+     * 【监控可观测性】接口层关键指标
      * =========================================================================
-     * Phase 1（当前）：基本 CRUD + 无校验 + 无文档
-     * Phase 2：加 @Valid + PUT 接口 + 分页 + 201 状态码
-     * Phase 3：springdoc-openapi 文档 + API 版本管理 + ResponseBodyAdvice 自动封装
+     *   - QPS：http.server.requests{uri=/api/users} 的 count/second
+     *   - P99 延迟：http.server.requests 的 percentile，>1s 告警
+     *   - 错误率：5xx/total，>1% 告警；4xx/total 关注但不告警
+     *   - Tomcat 线程：server.tomcat.threads.busy/current，busy 接近 max 告警
+     *   - 请求队列：tomcat.threads.busy 持续高位说明线程不够或下游慢
+     *   接入：Micrometer + Prometheus + Grafana，Alertmanager 告警
      * =========================================================================
      */
 
     /*
      * =========================================================================
-     * 【技术债务】TD-007-S Controller 层补充
+     * 【性能优化补充】Tomcat 与线程池调优（非可执行代码）
      * =========================================================================
      *
-     * TD-007-6: 缺少请求限流
-     *   现状：无接口访问频率限制
-     *   影响：可被高频调用消耗资源或暴力攻击
-     *   优先级：P2
-     *   修复方案：引入 Bucket4j 或 Spring RateLimiter，按 IP/用户限流
-     *   预估工时：1d
+     * 一、Tomcat 线程模型
+     *   每个请求分配一个线程（BIO/NIO），线程从线程池获取：
+     *   - server.tomcat.threads.min-spare=10（最小空闲线程）
+     *   - server.tomcat.threads.max=200（最大线程数，IO 密集型可调高）
+     *   - server.tomcat.accept-count=100（等待队列长度）
+     *   - server.tomcat.max-connections=8191（最大连接数）
      *
-     * TD-007-7: 缺少请求日志
-     *   现状：无请求/响应日志（除 HelloController 的 info 日志）
-     *   影响：排障时无法回溯请求参数和响应
-     *   优先级：P2
-     *   修复方案：加 RequestLoggingFilter 或 AOP 记录请求参数
-     *   预估工时：0.5d
+     * 二、线程池调优策略
+     *   1) CPU 密集型：threads.max = CPU 核数 + 1
+     *   2) IO 密集型：threads.max = CPU 核数 * 2 ~ 4（视 IO 等待比例）
+     *   3) 混合型：拆分线程池，CPU 任务和 IO 任务分开
+     *   4) 线程数不是越大越好：线程多 -> 上下文切换开销大 -> 吞吐反而下降
      *
-     * TD-007-8: 缺少 HATEOAS 链接
-     *   现状：响应无相关资源链接
-     *   影响：前端需硬编码 URL 模板
-     *   优先级：P3
-     *   修复方案：引入 Spring HATEOAS，响应中加 _links
-     *   预估工时：1.5d
+     * 三、连接超时配置
+     *   - server.connection-timeout=5s：建立连接超时
+     *   - server.keep-alive-timeout=60s：Keep-Alive 空闲超时
+     *   - server.max-keep-alive-requests=100：单连接最大请求数
+     *   - spring.mvc.async.request-timeout=30s：异步请求超时
      *
-     * TD-007-9: 缺少异步接口
-     *   现状：所有接口同步阻塞
-     *   影响：耗时操作阻塞线程，高并发下线程池耗尽
-     *   优先级：P3
-     *   修复方案：加 @Async 接口 + CompletableFuture 返回
-     *   预估工时：1d
+     * 四、背压与限流
+     *   1) 接受队列满时：Tomcat 拒绝新连接（Connection refused）
+     *   2) 自定义限流：Bucket4j 按 IP/用户/接口限流
+     *      - 每 IP 100 req/s，每用户 10 req/s，每接口 1000 req/s
+     *   3) 网关限流：Spring Cloud Gateway + Redis 限流过滤器
+     *   4) 自适应限流：根据系统负载动态调整限流阈值（如 Sentinel）
+     *
+     * 五、压测与容量规划
+     *   1) 压测工具：JMeter / wrk / Gatling
+     *   2) 关键指标：QPS / P99 延迟 / 错误率 / CPU / 内存
+     *   3) 容量公式：单实例 QPS * 实例数 = 总容量（留 30% 余量）
+     *   4) 压测环境与生产环境配置一致，否则数据无意义
      * =========================================================================
      */
 }

@@ -82,43 +82,75 @@ public class GlobalExceptionHandler {
 
     /*
      * =========================================================================
-     * 【技术债务】TD-010 全局异常处理
+     * 【性能优化】异常处理性能与可观测性（非可执行代码）
      * =========================================================================
      *
-     * TD-010-1: 缺少参数校验异常处理
-     *   现状：无 @ExceptionHandler(MethodArgumentNotValidException.class)
-     *   影响：@Valid 校验失败抛异常被兜底处理器当成 500
-     *   优先级：P1
-     *   修复方案：加 MethodArgumentNotValidException 处理器，返回 400 + 字段错误
-     *   预估工时：0.5d
+     * 一、异常处理开销分析
+     *   1) 异常构造：new Exception() 填充堆栈，约 1-10ms（堆栈深时更慢）
+     *   2) 堆栈获取：getStackTrace() 反射开销，避免在正常路径主动调用
+     *   3) 异常日志：ERROR 级日志带堆栈，IO 开销约 1-5ms（异步日志可消除）
+     *   4) 结论：异常用于异常路径，不要用异常控制正常流程
      *
-     * TD-010-2: 缺少唯一约束冲突处理
-     *   现状：DataIntegrityViolationException 被兜底当成 500
-     *   影响：用户名/邮箱重复时前端收到 500 而非 409
-     *   优先级：P2
-     *   修复方案：加 DataIntegrityViolationException 处理器，返回 409
-     *   预估工时：0.5d
+     * 二、高频异常的性能风险
+     *   1) 5xx 风暴：下游故障导致大量 5xx，每条都记 ERROR 日志 + 堆栈
+     *      日志 IO 成为瓶颈，磁盘写满
+     *      解决：熔断降级，5xx 响应不走兜底处理器，直接返回降级响应
+     *   2) 4xx 风暴：恶意请求触发大量 400/404
+     *      解决：限流 + WAF 拦截，4xx 日志降级为 WARN 不记堆栈
+     *   3) 日志采样：高频异常只记 10% 日志，全量记 Metrics
      *
-     * TD-010-3: Security 异常未统一格式
-     *   现状：401/403 由 Security 过滤器处理，不经过 @RestControllerAdvice
-     *   影响：认证/授权错误返回格式与业务错误不一致
-     *   优先级：P2
-     *   修复方案：配置 AuthenticationEntryPoint + AccessDeniedHandler 返回 ApiResponse
-     *   预估工时：1d
-     *
-     * TD-010-4: 5xx 错误无 traceId
-     *   现状：错误响应无 traceId，无法关联前端报错与后端日志
-     *   影响：用户反馈"出错了"但无法定位日志行
-     *   优先级：P2
-     *   修复方案：加 MDC traceId，异常处理器写入响应
-     *   预估工时：1d
+     * 三、异常处理最佳实践
+     *   1) 快速失败：参数校验在入口拦截，不进 Service
+     *   2) 异常分类：业务异常（404/409）不记堆栈，系统异常（500）记堆栈
+     *   3) 日志异步：AsyncAppender，业务线程不等日志写入
+     *   4) 响应缓存：静态错误页缓存，避免重复渲染
      *
      * =========================================================================
-     * 【重构路线图】异常处理演进方向
+     * 【监控可观测性】异常层关键指标
      * =========================================================================
-     * Phase 1（当前）：ResourceNotFoundException + 兜底 500
-     * Phase 2：加参数校验 400 + 唯一约束 409 + Security 401/403 统一格式
-     * Phase 3：traceId + RFC7807 Problem Details + 异常告警集成
+     *   - 异常计数：http.server.requests{status=4xx/5xx} 的 count
+     *   - 异常类型分布：自定义 Counter（exception.type=ResourceNotFound/Validation）
+     *   - ERROR 日志速率：logback.events{level=ERROR}，>100/min 告警
+     *   - 5xx P99 延迟：异常处理 + 日志写入的耗时
+     *   - 告警规则：5xx rate > 1%/min 触发 P1 告警，自动创建工单
+     *   接入：Micrometer Counter + Prometheus + Alertmanager + 企业微信/钉钉通知
+     * =========================================================================
+     */
+
+    /*
+     * =========================================================================
+     * 【性能优化补充】可观测性三大支柱（非可执行代码）
+     * =========================================================================
+     *
+     * 可观测性 = Metrics + Logging + Tracing
+     *
+     * 一、Metrics（指标）
+     *   定义：数值型时间序列数据，回答"发生了什么"
+     *   工具：Micrometer（门面） + Prometheus（存储） + Grafana（展示）
+     *   四种类型：
+     *     Counter：只增不减（请求数/错误数）
+     *     Gauge：可增可减（当前连接数/队列长度）
+     *     Timer：耗时分布（P50/P95/P99 延迟）
+     *     Distribution Summary：自定义分布（响应大小）
+     *   Spring Boot Actuator 自动暴露 /actuator/prometheus 端点
+     *
+     * 二、Logging（日志）
+     *   定义：离散事件记录，回答"具体发生了什么"
+     *   工具：SLF4J + Logback（本地） + ELK/Loki（集中）
+     *   结构化日志：JSON 格式，便于检索和分析
+     *     {"timestamp":"2024-01-15T10:30:00","level":"ERROR",
+     *      "logger":"c.e.m.e.GlobalExceptionHandler","message":"...",
+     *      "traceId":"abc123","spanId":"def456"}
+     *   日志关联：traceId 贯穿 Metrics/Logging/Tracing
+     *
+     * 三、Tracing（链路追踪）
+     *   定义：请求在分布式系统中的调用链路，回答"问题在哪"
+     *   工具：Micrometer Tracing + Zipkin/Jaeger/SkyWalking
+     *   核心概念：
+     *     Trace：一次请求的完整链路
+     *     Span：链路中的一个操作（如 HTTP 调用/DB 查询）
+     *     traceId/spanId：贯穿传递，日志中输出以关联
+     *   Spring Boot 3 + Micrometer Tracing 自动埋点 HTTP/JDBC/Redis
      * =========================================================================
      */
 }

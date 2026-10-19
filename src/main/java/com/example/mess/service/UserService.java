@@ -217,85 +217,78 @@ public class UserService {
 
     /*
      * =========================================================================
-     * 【技术债务】TD-006 Service 层
+     * 【性能优化】缓存策略与并发控制（非可执行代码）
      * =========================================================================
      *
-     * TD-006-1: 写方法缺少 @Transactional
-     *   现状：create/delete 方法未显式标注 @Transactional
-     *   影响：多步数据库操作无原子性保障（当前单步操作影响不大）
- *   优先级：P1
-     *   修复方案：写方法加 @Transactional，只读方法加 @Transactional(readOnly=true)
-     *   预估工时：0.5d
+     * 一、缓存命中率优化
+     *   1) 热点数据缓存：用户信息读多写少，适合 @Cacheable
+     *   2) 缓存 key 设计：单实体用 #id，列表用 'all' 或 #page+'-'+#size
+     *   3) 缓存失效：写操作后 @CacheEvict，避免脏读
+     *   4) TTL 设置：用户信息 30 分钟，列表 5 分钟，避免缓存雪崩
+     *   5) 缓存预热：启动时加载热点数据，避免首次请求穿透
      *
-     * TD-006-2: 唯一性校验存在竞态窗口
-     *   现状：existsByUsername 检查与 insert 之间存在时间窗口
-     *   影响：并发创建相同用户名可能绕过检查
-     *   优先级：P2
-     *   修复方案：依赖数据库唯一索引兜底 + catch DataIntegrityViolationException
-     *   预估工时：0.5d
+     * 二、缓存常见问题
+     *   1) 缓存穿透：查询不存在的 key，每次都查库
+     *      解决：缓存空值（短 TTL）或布隆过滤器
+     *   2) 缓存击穿：热点 key 过期瞬间大量请求查库
+     *      解决：互斥锁（只允许一个线程查库回填）或逻辑过期
+     *   3) 缓存雪崩：大量 key 同时过期
+     *      解决：TTL 加随机偏移（30min + random(0,5min)）
      *
-     * TD-006-3: 缺少更新方法
-     *   现状：只有 create/delete，无 updateUser
-     *   影响：无法修改用户信息
-     *   优先级：P1
-     *   修复方案：加 updateUser 方法 + PUT /api/users/{id}
-     *   预估工时：1d
+     * 三、并发控制
+     *   1) 乐观锁：@Version 字段，冲突时抛 OptimisticLockException
+     *   2) 悲观锁：SELECT ... FOR UPDATE，适合高并发写
+     *   3) 分布式锁：Redisson，多实例场景下保护临界区
+     *   4) 限流：Guava RateLimiter 或 Bucket4j，保护下游
      *
-     * TD-006-4: 缓存注解可能自调用失效
-     *   现状：@Cacheable/@CacheEvict 存在，但同类内自调用不走代理
-     *   影响：缓存静默失效，每次查库
-     *   优先级：P2
-     *   修复方案：确保缓存方法从外部调用，或注入自身代理
-     *   预估工时：0.5d
-     *
-     * TD-006-5: 缺少批量操作
-     *   现状：无批量创建/删除
-     *   影响：批量导入场景需逐条调用
-     *   优先级：P3
-     *   修复方案：加 createUsers(List)/deleteUsers(Lists) + 批量 Controller
-     *   预估工时：1d
+     * 四、异步化
+     *   1) @Async：非核心逻辑（通知/日志）异步执行，不阻塞主流程
+     *   2) 事件驱动：ApplicationEventPublisher + @EventListener
+     *   3) 消息队列：RocketMQ/Kafka，削峰填谷，解耦上下游
      *
      * =========================================================================
-     * 【重构路线图】Service 层演进方向
+     * 【监控可观测性】Service 层关键指标
      * =========================================================================
-     * Phase 1（当前）：基本 CRUD + 缓存 + 无事务注解
-     * Phase 2：加 @Transactional + 唯一约束兜底 + updateUser
-     * Phase 3：批量操作 + 事件驱动（领域事件）+ 缓存策略优化
+     *   - 缓存命中率：cache.gets{result=hit/miss}，命中率 <80% 需优化
+     *   - 方法耗时：自定义 Micrometer Timer，P99 > 500ms 告警
+     *   - 并发量：executor.active/queued（线程池指标）
+     *   - 锁等待：分布式锁等待时长，>1s 告警
+     *   - 事务回滚率：rollback/commit 比值，>5% 需排查
      * =========================================================================
      */
 
     /*
      * =========================================================================
-     * 【技术债务】TD-006-S Service 层补充
+     * 【性能优化补充】JVM 调优与 GC 策略（非可执行代码）
      * =========================================================================
      *
-     * TD-006-6: 缺少事件发布
-     *   现状：创建/删除用户后无事件通知
-     *   影响：其他模块（如通知、审计）无法感知用户变更
-     *   优先级：P3
-     *   修复方案：用 ApplicationEventPublisher 发布 UserCreatedEvent
-     *   预估工时：1d
+     * 一、GC 选择
+     *   1) G1 GC（JDK 9+ 默认）：大堆（>4GB）表现好，停顿可控
+     *      -XX:+UseG1GC -XX:MaxGCPauseMillis=200
+     *   2) ZGC（JDK 11+ 实验，JDK 15+ 生产）：超低停顿 <1ms，适合超大堆
+     *      -XX:+UseZGC
+     *   3) Parallel GC（JDK 8 默认）：吞吐量优先，停顿长
+     *      -XX:+UseParallelGC
+     *   建议：JDK 17+ 用 G1 或 ZGC，JDK 8 用 Parallel 或 CMS（已废弃）
      *
-     * TD-006-7: 缺少审计日志
-     *   现状：谁在什么时候创建/修改/删除了用户无记录
-     *   影响：无法追溯操作历史，安全审计缺失
-     *   优先级：P2
-     *   修复方案：用 AOP 或事件监听记录操作日志（操作人/操作/时间/目标）
-     *   预估工时：1d
+     * 二、堆内存配置
+     *   1) 容器环境：-XX:MaxRAMPercentage=70.0（自动适配容器内存限制）
+     *   2) 物理机：-Xms4g -Xmx4g（Xms=Xmx 避免动态扩缩堆）
+     *   3) 元空间：-XX:MetaspaceSize=256m -XX:MaxMetaspaceSize=512m
+     *   4) 直接内存：-XX:MaxDirectMemorySize=1g（NIO/Netty 场景）
      *
-     * TD-006-8: 缺少导入导出
-     *   现状：无批量导入/导出用户功能
-     *   影响：运营需手动逐条操作
-     *   优先级：P3
-     *   修复方案：加 import/export 接口，支持 CSV/Excel
-     *   预估工时：2d
+     * 三、GC 日志与排障
+     *   1) 开启 GC 日志：-Xlog:gc*:file=gc.log:time,uptime,level,tags
+     *   2) 分析工具：GCViewer / GCEasy（在线） / JFR（Java Flight Recorder）
+     *   3) 关键指标：GC 频率 >1次/秒 告警；单次 GC 停顿 >500ms 告警
+     *   4) Full GC 排查：老年代不足/元空间不足/内存泄漏/System.gc() 误调
      *
-     * TD-006-9: 缺少搜索/排序
-     *   现状：findAll 返回全部数据，无搜索/排序
-     *   影响：管理后台无法按条件筛选
-     *   优先级：P2
-     *   修复方案：加 Specification 动态查询 或 QueryDSL
-     *   预估工时：1.5d
+     * 四、内存泄漏常见场景
+     *   1) 静态集合无限增长：static Map<List> 只加不清
+     *   2) ThreadLocal 未 remove：线程池场景下 ThreadLocal 泄漏
+     *   3) 缓存无 TTL：ConcurrentHashMap 当缓存，无过期策略
+     *   4) 监听器未注销：事件监听器持有大对象引用
+     *   排查工具：jmap -histo / MAT（Memory Analyzer Tool）分析堆转储
      * =========================================================================
      */
 }

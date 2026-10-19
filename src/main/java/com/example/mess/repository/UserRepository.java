@@ -91,42 +91,70 @@ public interface UserRepository extends JpaRepository<User, Long> {
 
 /*
  * =========================================================================
- * 【技术债务】TD-005 Repository 层
+ * 【性能优化】查询性能优化清单（非可执行代码）
  * =========================================================================
  *
- * TD-005-1: 缺少分页查询
- *   现状：findAll() 返回全部数据，无分页
- *   影响：数据量大时内存溢出，前端卡顿
- *   优先级：P1
- *   修复方案：改为 Page<User> findAll(Pageable pageable)
- *   预估工时：0.5d
+ * 一、索引优化
+ *   1) 唯一索引：username/email 加 UNIQUE INDEX，既保唯一又加速等值查询
+ *   2) 组合索引：WHERE a=? AND b=? 加 (a,b) 组合索引，遵循最左前缀
+ *   3) 覆盖索引：SELECT 的字段都在索引中，免回表
+ *   4) 避免索引失效：LIKE '%x%' 前导通配符不走索引；
+ *      函数包裹字段 WHERE YEAR(created)=2024 不走索引
  *
- * TD-005-2: 缺少条件查询
- *   现状：无法按用户名/邮箱模糊搜索
- *   影响：管理后台无法搜索用户
- *   优先级：P2
- *   修复方案：加 findByUsernameContaining/Pageable 或 Specification 动态查询
- *   预估工时：1d
+ * 二、N+1 问题专项
+ *   检测：spring.jpa.show-sql=true + 统计查询数
+ *   场景：查 N 个用户，每个用户的关联数据懒加载触发 N 条 SQL
+ *   解决方案对比：
+ *     JOIN FETCH：一次 JOIN 查出，最直接，但结果集可能笛卡尔积膨胀
+ *     @EntityGraph：声明式，代码侵入小，Hibernate 自动生成 LEFT JOIN
+ *     batch_fetch_size：分批 IN 查询，N 条降为 N/50 条，适合批量场景
  *
- * TD-005-3: 无软删除支持
- *   现状：deleteById 是物理删除，数据不可恢复
- *   影响：误删无法恢复
- *   优先级：P3
- *   修复方案：实体加 deleted 字段，Repository 方法加 @Where 或自定义查询
- *   预估工时：1d
- *
- * TD-005-4: 缺少批量操作
- *   现状：无 saveAll/deleteAllById 等批量方法
- *   影响：批量导入/删除需逐条操作，性能差
- *   优先级：P3
- *   修复方案：继承 JpaRepository 已有 saveAll/deleteAllById，直接使用
- *   预估工时：0.5d
+ * 三、深分页专项
+ *   问题：LIMIT 100000,20 扫描 100020 行丢弃前 100000 行
+ *   方案一：游标分页 WHERE id < lastId ORDER BY id DESC LIMIT 20（最快）
+ *   方案二：延迟关联 SELECT * FROM user WHERE id IN
+ *           (SELECT id FROM user ORDER BY id LIMIT 100000,20)
+ *   方案三：Slice<T> 只查 hasNext，不算 total，省去 COUNT
  *
  * =========================================================================
- * 【重构路线图】Repository 层演进方向
+ * 【监控可观测性】Repository 层关键指标
  * =========================================================================
- * Phase 1（当前）：基本 CRUD + existsBy，无分页无搜索
- * Phase 2：加分页 + 条件搜索 + 批量操作
- * Phase 3：软删除 + JPA Auditing + 审计查询 + 读写分离（如需要）
+ *   - 查询耗时：hibernate.query.execution.time（P99 > 100ms 告警）
+ *   - 慢查询日志：MySQL slow_query_log + pt-query-digest 分析
+ *   - 连接池等待：hikaricp.connections.pending > 0 说明连接不够
+ *   - 事务时长：spring.transaction.active > 5s 告警（长事务锁表）
+ *   - 行锁等待：MySQL innodb_row_lock_waits 指标
+ * =========================================================================
+ */
+
+/*
+ * =========================================================================
+ * 【性能优化补充】数据库连接池与读写分离（非可执行代码）
+ * =========================================================================
+ *
+ * 一、HikariCP 调优详解
+ *   HikariCP 是 Spring Boot 默认连接池，性能最优（无锁设计）：
+ *   - maximum-pool-size：10（官方建议，CPU 核数 * 2 + 磁盘数）
+ *     公式：connections = (core_count * 2) + effective_spindle_count
+ *   - minimum-idle：与 maximum-pool-size 相同（固定大小池，避免动态创建）
+ *   - idle-timeout：600000ms（空闲连接超时，固定池时无意义）
+ *   - max-lifetime：1800000ms（连接最大存活，需 < MySQL wait_timeout=28800s）
+ *   - connection-timeout：30000ms（获取连接超时，超时抛 SQLTransientConnectionException）
+ *   - validation-timeout：5000ms（连接活性检测超时）
+ *
+ * 二、读写分离
+ *   1) 主从复制：MySQL binlog 复制，主写从读
+ *   2) Spring 实现：AbstractRoutingDataSource 动态切换数据源
+ *   3) 注解驱动：@ReadOnly -> 从库，@WriteOnly -> 主库
+ *   4) 复制延迟：主从延迟 1-100ms，写后立即读需走主库（强制路由）
+ *   5) 分库分表：ShardingSphere，单表 >1000 万行时考虑
+ *
+ * 三、SQL 优化检查清单
+ *   [ ] EXPLAIN 查看执行计划，type 至少 range，避免 ALL（全表扫描）
+ *   [ ] rows 扫描行数 < 表行数 10%
+ *   [ ] Using filesort：排序无索引，需加排序字段索引
+ *   [ ] Using temporary：临时表，需优化 GROUP BY/DISTINCT
+ *   [ ] 索引选择性：COUNT(DISTINCT col)/COUNT(*) > 0.3 才值得加索引
+ *   [ ] 避免 SELECT *：只查需要的字段，减少 IO 和网络传输
  * =========================================================================
  */

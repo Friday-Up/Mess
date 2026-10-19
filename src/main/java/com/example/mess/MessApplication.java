@@ -41,36 +41,40 @@ public class MessApplication {
 
     /*
      * =========================================================================
-     * 【技术债务】TD-001 启动类相关
+     * 【性能优化】启动性能与资源占用（非可执行代码）
      * =========================================================================
      *
-     * TD-001-1: 无健康检查端点
-     *   现状：启动后无法快速确认应用是否就绪
-     *   影响：部署后需人工访问接口验证，CI/CD 流水线无法自动判断健康
-     *   优先级：P2
-     *   修复方案：引入 spring-boot-starter-actuator，暴露 /actuator/health
-     *   预估工时：0.5d
+     * 一、启动耗时优化
+     *   1) 排除无用自动配置：
+     *      @SpringBootApplication(exclude = {DataSourceAutoConfiguration.class})
+     *      减少 Bean 扫描和初始化开销
+     *   2) 懒加载：spring.main.lazy-initialization=true
+     *      Bean 用到时才初始化，启动快但首次请求慢，适合开发环境
+     *   3) 关闭 JMX：spring.jmx.enabled=false，减少 MBean 注册开销
+     *   4) 分析启动瓶颈：--debug 查看自动配置报告，
+     *      或引入 spring-boot-startup-report 插件量化各 Bean 初始化耗时
      *
-     * TD-001-2: 无优雅停机
-     *   现状：kill 进程时正在处理的请求会被中断
-     *   影响：滚动更新时可能出现 5xx
-     *   优先级：P3
-     *   修复方案：server.shutdown=graceful + lifecycle timeout
-     *   预估工时：0.5d
+     * 二、内存占用优化
+     *   1) JVM 参数：-Xms256m -Xmx512m 限制堆大小，避免容器 OOM
+     *   2) -XX:+UseG1GC：大堆场景下 G1 比 CMS 更稳定
+     *   3) 线程池：server.tomcat.threads.max=200 控制线程数
+     *   4) 连接池：spring.datasource.hikari.maximum-pool-size=10 控制连接数
      *
-     * TD-001-3: 配置硬编码风险
-     *   现状：部分配置值可能硬编码在代码中
-     *   影响：换环境需改代码重新部署
-     *   优先级：P2
-     *   修复方案：所有配置外部化到 application-{profile}.yml 或环境变量
-     *   预估工时：1d
+     * 三、容器化部署建议
+     *   - JVM 堆大小设为容器内存的 50%-70%
+     *   - 使用 -XX:MaxRAMPercentage=70.0 替代硬编码 -Xmx，自动适配容器内存
+     *   - Dockerfile 用多阶段构建减小镜像体积
+     *   - 健康探针：liveness=/actuator/health/liveness, readiness=/actuator/health/readiness
      *
      * =========================================================================
-     * 【重构路线图】启动类演进方向
+     * 【监控可观测性】启动阶段的关键指标
      * =========================================================================
-     * Phase 1（当前）：单体启动，@EnableCaching，基本配置
-     * Phase 2：引入 Actuator 健康检查 + 优雅停机 + 配置外部化
-     * Phase 3：如需微服务化，拆分启动类 + 引入配置中心（Nacos/Apollo）
+     *   - 启动耗时：application.started.time（Micrometer 指标）
+     *   - 就绪耗时：application.ready.time
+     *   - JVM 内存：jvm.memory.used/committed/max
+     *   - 线程数：jvm.threads.live/daemon/peak
+     *   - GC 次数/耗时：jvm.gc.pause（P99 耗时需关注）
+     *   接入 Micrometer + Prometheus + Grafana 可形成完整监控面板
      * =========================================================================
      */
 }
