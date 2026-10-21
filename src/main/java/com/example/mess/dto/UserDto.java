@@ -123,40 +123,49 @@ public class UserDto {
 
     /*
      * =========================================================================
-     * 【输入安全】XSS/注入防护与输入净化（非可执行代码）
+     * 【DDD 上下文映射】DTO 作为防腐层（ACL）（非可执行代码）
      * =========================================================================
      *
-     * 一、OWASP A03:2021 - 注入攻击
-     *   DTO 是外部输入的第一道防线，所有输入都不可信：
-     *   1) SQL 注入：JPA 参数绑定天然防护（PreparedStatement），
-     *      但原生 SQL 拼接仍有风险，排序字段必须白名单
-     *   2) XSS（跨站脚本）：username 存 <script>alert(1)</script>
-     *      防护：
-     *      - 输入净化：HtmlUtils.htmlEscape() 或 OWASP Java HTML Sanitizer
-     *      - 输出转义：前端框架（React/Vue）默认转义，不用 v-html/dangerouslySetInnerHTML
-     *      - CSP 头：Content-Security-Policy: default-src 'self'
-     *   3) LDAP/XPath/NoSQL 注入：对应查询用参数化，不拼接用户输入
+     * 一、限界上下文（Bounded Context）
+     *   定义：一个业务模型的适用边界，同一术语在不同上下文有不同含义
+     *   示例：
+     *   - 用户上下文：User = 注册用户（含密码/角色/登录态）
+     *   - 订单上下文：User = 下单人（只需 id/昵称/收货地址）
+     *   - 营销上下文：User = 营销对象（只需 id/标签/手机号）
+     *   同一个"用户"在不同上下文中的模型不同，不应共享同一个 User 类
      *
-     * 二、输入校验纵深防御
-     *   第一层：前端校验（用户体验，可被绕过）
-     *   第二层：DTO 注解校验（@NotBlank/@Email/@Size/@Pattern）
-     *   第三层：Service 层业务校验（存在性/权限/状态）
-     *   第四层：数据库约束（唯一索引/外键/检查约束）
-     *   原则：每层都做，任何一层被绕过下一层兜底
+     * 二、上下文映射（Context Mapping）模式
+     *   1) 防腐层（Anti-Corruption Layer，ACL）：
+     *      下游上下文不直接使用上游模型，通过翻译层转换
+     *      DTO 就是防腐层的实现：上游 User -> 下游 OrderUserDto
+     *      作用：上游模型变更不影响下游业务逻辑
+     *   2) 共享内核（Shared Kernel）：
+     *      两个上下文共享一部分模型（如共用的值对象 Money）
+     *      风险：共享部分变更影响双方，需协商
+     *   3) 客户-供应商（Customer-Supplier）：
+     *      上游优先，下游适配（如订单上下文适配用户上下文的 API）
+     *   4) 遵奉者（Conformist）：
+     *      下游无条件遵从上游模型（上游强势，无法协商）
+     *   5) 开放主机服务（Open Host Service）：
+     *      上游提供标准化 API/协议（如 RESTful + OpenAPI 规范）
+     *   6) 发布语言（Published Language）：
+     *      上游发布标准化的数据格式（如 JSON Schema/Avro/Protobuf）
      *
-     * 三、批量赋值攻击（Mass Assignment）
-     *   场景：前端提交 {"username":"a","role":"ADMIN"}，后端直接绑定到实体
-     *   防护：
-     *   1) DTO 与实体分离（本项目已做），DTO 无 role 字段
-     *   2) 不用 Entity 直接接收 @RequestBody
-     *   3) Jackson @JsonIgnore 阻止反序列化敏感字段
-     *   4) 显式赋值：DTO -> Entity 逐字段 set，不用 BeanUtils.copyProperties
+     * 三、本类在上下文映射中的角色
+     *   UserDto 是用户上下文对外发布的"发布语言"：
+     *   1) 对外契约：前端/API 消费者依赖 UserDto 的结构，不依赖 User 实体
+     *   2) 字段裁剪：只暴露用户上下文愿意发布的字段
+     *   3) 版本演进：UserDto 加字段向后兼容，删字段需版本化（v2）
+     *   4) 微服务拆分后：订单服务通过用户服务的 API 获取 UserDto，
+     *      订单服务内部有自己的 OrderUserDto（防腐层翻译）
      *
-     * 四、文件上传安全（如后续扩展）
-     *   1) 白名单后缀：.jpg/.png/.pdf，拒绝 .exe/.jsp/.sh
-     *   2) 文件头校验：Magic Number 校验真实类型，不信 Content-Type
-     *   3) 文件名净化：去除路径穿越（../），UUID 重命名
-     *   4) 存储隔离：不存 Web 可访问目录，用 OSS/S3
+     * 四、CQRS（命令查询职责分离）
+     *   命令（写）和查询（读）使用不同的模型：
+     *   - 命令模型：User 实体（含业务规则/校验/状态变更）
+     *   - 查询模型：UserDto/UserView（只读，可从读库/缓存/物化视图查询）
+     *   - 命令走 Service -> Repository -> 写库
+     *   - 查询可直接走查询服务 -> 读库/ES/缓存，不经过聚合根
+     *   - 本项目当前读写共用 User 实体，数据量大后可引入 CQRS
      * =========================================================================
      */
 }

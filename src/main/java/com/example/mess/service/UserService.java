@@ -217,74 +217,58 @@ public class UserService {
 
     /*
      * =========================================================================
-     * 【业务安全】越权/幂等/竞态/重放防护（非可执行代码）
+     * 【DDD 服务分层】领域服务 vs 应用服务（非可执行代码）
      * =========================================================================
      *
-     * 一、越权防护（OWASP A01:2021）
-     *   1) 水平越权：用户 A 操作用户 B 的数据
-     *      场景：DELETE /api/users/456，但当前用户是 ID=123
-     *      防护：操作前校验资源归属（userId == currentUser.id）
-     *   2) 垂直越权：普通用户调用管理员接口
-     *      场景：普通用户直接请求 DELETE /api/users/456
-     *      防护：接口级 @PreAuthorize("hasRole('ADMIN')")
-     *   3) 参数篡改：前端隐藏 admin 字段，但请求体含 "role":"ADMIN"
-     *      防护：DTO 无 role 字段（批量赋值攻击防护）
+     * 一、DDD 的四种服务
+     *   1) 应用服务（Application Service）：
+     *      - 用例编排层：接收请求 -> 调用领域服务/仓储 -> 返回结果
+     *      - 不含业务规则，只做流程编排
+     *      - 事务边界在这里（@Transactional）
+     *      - 本类 UserService 当前是应用服务（编排 Repository 调用）
+     *   2) 领域服务（Domain Service）：
+     *      - 承载不属于任何单一实体的业务规则
+     *      - 如：转账逻辑涉及 AccountA 和 AccountB，不属于单个 Account
+     *      - 实现：TransferDomainService.transfer(from, to, amount)
+     *      - 纯业务逻辑，不依赖框架（无 @Transactional/@Autowired）
+     *   3) 基础设施服务（Infrastructure Service）：
+     *      - 技术实现：发邮件/发短信/文件存储/消息队列
+     *      - 接口在领域层，实现在基础设施层（依赖倒置）
+     *      - 如：EmailSender 接口 + SmtpEmailSender 实现
+     *   4) 门面服务（Facade/Remote Service）：
+     *      - 对外 API 的适配层：REST Controller / gRPC Service / MQ Listener
+     *      - 只做协议转换，委托给应用服务
+     *      - 本项目 UserController 就是门面服务
      *
-     * 二、幂等性设计（防重复提交）
-     *   1) 幂等键：客户端生成 requestId，服务端 Redis SETNX 去重
-     *      同一 requestId 的重复请求返回首次结果
-     *   2) 数据库唯一约束：username 唯一索引，重复插入抛异常
-     *   3) 乐观锁：@Version 字段，重复更新抛 OptimisticLockException
-     *   4) Token 机制：表单页生成一次性 Token，提交时校验后销毁
+     * 二、本类的演进方向（从应用服务到 DDD 分层）
+     *   当前：UserService 既是应用服务又含部分领域逻辑
+     *   目标分层：
+     *   controller/UserController.java        -> 门面服务（协议适配）
+     *   service/UserApplicationService.java   -> 应用服务（用例编排+事务）
+     *   domain/UserDomainService.java         -> 领域服务（跨实体业务规则）
+     *   domain/User.java                      -> 聚合根（实体内业务规则）
+     *   repository/UserRepository.java        -> 仓储接口（领域层）
+     *   repository/impl/UserRepositoryImpl.java -> 仓储实现（基础设施层）
+     *   infra/EmailSender.java                -> 基础设施服务接口
+     *   infra/SmtpEmailSender.java            -> 基础设施服务实现
      *
-     * 三、竞态条件防护
-     *   1) 检查-操作竞态：existsBy 检查通过后另一线程已插入
-     *      防护：数据库唯一约束兜底 + catch DataIntegrityViolationException
-     *   2) 余额扣减竞态：读余额 -> 计算 -> 写回，并发下丢失更新
-     *      防护：乐观锁（@Version）或悲观锁（SELECT FOR UPDATE）
-     *   3) 库存扣减竞态：超卖问题
-     *      防护：UPDATE stock SET count = count - 1 WHERE count > 0（原子操作）
+     * 三、六边形架构（Hexagonal Architecture / Ports & Adapters）
+     *   核心思想：领域逻辑在中心，通过端口（接口）与外部交互
+     *   结构：
+     *   - 内部（领域核心）：实体/值对象/领域服务/应用服务 + 端口接口
+     *   - 外部（适配器）：
+     *     驱动适配器（左）：REST Controller/MQ Listener/定时任务 -> 调应用服务
+     *     被驱动适配器（右）：JPA Repository/SMTP/MQ Producer -> 实现端口接口
+     *   依赖方向：外部适配器依赖内部端口，内部不依赖外部
+     *   好处：领域逻辑可独立测试（mock 端口），技术栈可替换（换 ORM/换 MQ）
      *
-     * 四、重放攻击防护
-     *   1) 时间戳 + 签名：请求带 timestamp + sign，服务端校验时间窗口（5分钟）
-     *   2) Nonce：请求带随机数，服务端 Redis 记录已用 nonce，拒绝重复
-     *   3) HTTPS：防止中间人截获请求重放
-     *   4) 接口限流：同一 IP/用户频率限制，降低重放收益
-     * =========================================================================
-     */
-
-    /*
-     * =========================================================================
-     * 【安全补充】API 密钥管理与密钥轮转（非可执行代码）
-     * =========================================================================
-     *
-     * 一、密钥分类与管理
-     *   1) 数据库密码：环境变量注入（SPRING_DATASOURCE_PASSWORD），
-     *      K8s Secret 挂载，禁止硬编码/明文配置文件
-     *   2) JWT 签名密钥：>=256 bit（HS256）或 RSA 私钥（RS256），
-     *      密钥存储：KMS（AWS KMS/阿里云 KMS）或 Vault
-     *   3) 对称加密密钥：AES-256，数据加密用，密钥与数据分离存储
-     *   4) 第三方 API 密钥：环境变量，密钥泄露监控（GitHub 扫描）
-     *
-     * 二、密钥轮转策略
-     *   1) 定期轮转：JWT 密钥每 90 天轮转，数据库密码每 180 天
-     *   2) 平滑轮转：新旧密钥并存期（双密钥验证），旧 Token 过期后移除旧密钥
-     *      JWT 实现：kid 头标识密钥版本，验证时按 kid 选密钥
-     *   3) 紧急轮转：密钥泄露后立即轮转，吊销所有已发 Token
-     *   4) 自动化：K8s Secret 定时更新 + 滚动重启（Pod 重新读取 Secret）
-     *
-     * 三、密钥泄露检测
-     *   1) 代码扫描：Git 历史扫描（git-secrets/truffleHog），检测提交过的密钥
-     *   2) GitHub 扫描：GitHub Secret Scanning 自动检测公开仓库中的密钥
-     *   3) 运行时检测：异常 API 调用模式（凌晨大量调用/异地调用）
-     *   4) 泄露响应：立即吊销密钥 -> 轮转 -> 排查泄露范围 -> 通知受影响用户
-     *
-     * 四、密钥存储方案对比
-     *   环境变量：简单，但 ps/proc 可见，容器场景下 env 可被读取
-     *   K8s Secret：base64 编码（非加密），需配合 RBAC 和 etcd 加密
-     *   Vault（HashiCorp）：专业密钥管理，动态密钥，审计日志，访问控制
-     *   KMS（云厂商）：托管密钥，自动轮转，集成应用加密 SDK
-     *   建议：开发用环境变量，生产用 Vault 或 KMS
+     * 四、整洁架构（Clean Architecture）对比
+     *   同心圆结构，依赖规则：外层依赖内层，内层不依赖外层
+     *   - 实体层（Entity）：业务实体/值对象
+     *   - 用例层（Use Case）：应用服务
+     *   - 接口适配层（Interface Adapter）：Controller/Gateway/Presenter
+     *   - 框架层（Framework）：Spring/JPA/数据库
+     *   与六边形架构本质相同，都是"领域核心 + 依赖倒置"
      * =========================================================================
      */
 }

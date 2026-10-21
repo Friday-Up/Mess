@@ -143,90 +143,56 @@ public class SecurityConfig {
 
     /*
      * =========================================================================
-     * 【认证安全】OWASP A07 身份识别和认证失效防护（非可执行代码）
+     * 【分布式安全】微服务认证授权架构（非可执行代码）
      * =========================================================================
      *
-     * 一、密码安全生命周期
-     *   1) 存储：BCrypt（cost>=10），绝不明文/MD5/SHA1
-     *   2) 传输：HTTPS 加密传输，登录页强制 HTTPS
-     *   3) 重置：Token 一次性 + 短 TTL（15分钟），Token 哈希存储
-     *   4) 修改：需验证旧密码
-     *   5) 强度：>=8位，含大小写/数字/特殊字符，检查弱密码字典（top10000）
-     *   6) 过期：90天强制修改（视业务，有争议，NIST 建议不强制定期换）
+     * 一、微服务认证架构演进
+     *   单体：Session 存在应用内存，Cookie 关联 Session
+     *   集群：Session 共享（Spring Session + Redis）
+     *   微服务：无状态 Token（JWT），每个服务独立验证
      *
-     * 二、会话/Token 安全
-     *   Session 方案：
-     *   [ ] Session ID 用 SecureRandom 生成，足够长（>=128 bit）
-     *   [ ] Cookie 标志：HttpOnly（防 XSS 窃取）+ Secure（仅 HTTPS）+ SameSite=Lax/Strict（防 CSRF）
-     *   [ ] Session 超时：30分钟无操作失效
-     *   [ ] 登录后重新生成 Session ID（防 Session Fixation）
-     *   [ ] 登出时销毁 Session（invalidate()）
-     *   JWT 方案：
-     *   [ ] 密钥强度：>=256 bit，密钥轮转（kid 头标识版本）
-     *   [ ] 算法：HS256 或 RS256，禁用 none 算法
-     *   [ ] Payload 最小化：不放敏感数据（密码/手机号），JWT 可被解码
-     *   [ ] TTL 短：Access Token 15分钟 + Refresh Token 7天
-     *   [ ] Refresh Token 一次性使用，用后轮转
-     *   [ ] 黑名单：登出/改密后 Token 加入 Redis 黑名单
+     * 二、JWT 在微服务中的流转
+     *   1) 登录：用户 -> 网关 -> 认证服务 -> 验证凭证 -> 签发 JWT
+     *   2) 携带：前端将 JWT 存 localStorage，每次请求放 Authorization: Bearer <jwt>
+     *   3) 网关验证：网关统一验证 JWT 签名/过期，无效直接 401
+     *   4) 传递：网关将用户信息放 Header（X-User-Id/X-User-Roles）转发给后端
+     *   5) 后端信任：后端从 Header 读用户信息，不再验 JWT（信任网关）
+     *      注意：后端需确保请求来自网关（内网隔离/mTLS/网关 IP 白名单）
+     *   6) 服务间调用：服务 A 调服务 B 时，透传原始 JWT 或用服务 Token
      *
-     * 三、暴力破解防护
-     *   1) 失败计数：5 次失败锁定 15 分钟（账号维度 + IP 维度）
-     *   2) 验证码：3 次失败后要求图形验证码/滑块
-     *   3) 限流：登录接口限流（10 req/min/IP）
-     *   4) 告警：连续失败触发安全告警
-     *   5) 延迟响应：失败后 sleep(1s)，增加暴力破解成本
+     * 三、OAuth2 / OIDC（开放授权 / 开放身份连接）
+     *   场景：第三方登录（微信/GitHub/Google）、SSO（单点登录）
+     *   角色：
+     *   - 资源所有者：用户
+     *   - 客户端：第三方应用
+     *   - 授权服务器：签发 Token（Keycloak/Auth0/自建）
+     *   - 资源服务器：业务服务（验证 Token）
+     *   流程（授权码模式）：
+     *   1) 用户点击"微信登录" -> 跳转微信授权页
+     *   2) 用户授权 -> 微信返回授权码 -> 客户端用授权码换 Token
+     *   3) 客户端带 Token 请求资源服务器 -> 资源服务器验证 Token
+     *   Spring Security OAuth2：
+     *   - @EnableWebSecurity + oauth2ResourceServer().jwt() -> 资源服务器
+     *   - Spring Authorization Server -> 授权服务器
      *
-     * 四、多因素认证（MFA）
-     *   1) 短信验证码：二次验证（SMS OTP）
-     *   2) TOTP：Google Authenticator（时间基一次性密码）
-     *   3) WebAuthn：硬件密钥/指纹（最强）
-     *   4) 适用场景：管理员账户/敏感操作/金融场景
-     * =========================================================================
-     */
-
-    /*
-     * =========================================================================
-     * 【安全补充】CSRF/SSRF/点击劫持防护（非可执行代码）
-     * =========================================================================
+     * 四、服务间认证（mTLS / Service Token）
+     *   网关到后端：信任网关 Header（内网隔离）
+     *   服务到服务：
+     *   1) mTLS（双向 TLS）：服务 A 和服务 B 互验证书，Istio 自动注入
+     *   2) Service Token：服务 A 用自身凭证（API Key/服务 JWT）调服务 B
+     *   3) 服务账号：K8s ServiceAccount + RBAC
+     *   零信任网络：不信任内网，所有调用都需认证（mTLS + 权限）
      *
-     * 一、CSRF（跨站请求伪造）- OWASP A01
-     *   原理：用户已登录 A 站，访问恶意 B 站，B 站自动向 A 站发请求（带 Cookie）
-     *   防护：
-     *   1) Token 方案：服务端生成 CSRF Token，前端表单携带，服务端校验
-     *   2) SameSite Cookie：SameSite=Lax/Strict，跨站请求不带 Cookie
-     *   3) 验证 Origin/Referer：检查请求来源是否本站
-     *   4) 本项目禁用 CSRF 的理由：走 Token 认证（非 Cookie），CSRF 不适用
-     *      若恢复 Cookie 认证，必须重新启用 CSRF
-     *
-     * 二、SSRF（服务端请求伪造）
-     *   原理：攻击者让服务端向内网发起请求（如请求元数据服务 169.254.169.254）
-     *   场景：用户输入 URL，服务端去请求（如"图片代理"/"URL 预览"功能）
-     *   防护：
-     *   1) URL 白名单：只允许 http/https，只允许特定域名
-     *   2) 禁止内网：解析 DNS 后校验 IP 不在私有网段（10.x/172.16.x/192.168.x/127.x）
-     *   3) 禁止重定向：跟随重定向后再次校验目标 IP
-     *   4) 云元数据：禁止 169.254.169.254（AWS/GCP 元数据接口）
-     *
-     * 三、点击劫持（Clickjacking）
-     *   原理：恶意网站用 iframe 嵌入目标网站，用户点击被劫持
-     *   防护：
-     *   1) X-Frame-Options: DENY（禁止 iframe 嵌入）
-     *      Spring Security: .headers().frameOptions().deny()
-     *   2) CSP frame-ancestors: 'none'（更现代的替代方案）
-     *   3) JavaScript 防护：if (window.top !== window.self) window.top.location = window.self.location
-     *
-     * 四、安全响应头完整清单
-     *   X-Content-Type-Options: nosniff（禁止 MIME 嗅探）
-     *   X-Frame-Options: DENY（防点击劫持）
-     *   X-XSS-Protection: 1; mode=block（旧版浏览器 XSS 过滤）
-     *   Content-Security-Policy: default-src 'self'（CSP，最强 XSS 防护）
-     *   Strict-Transport-Security: max-age=31536000; includeSubDomains（强制 HTTPS）
-     *   Referrer-Policy: strict-origin-when-cross-origin（控制 Referrer 泄露）
-     *   Permissions-Policy: camera=(), microphone=(), geolocation=()（禁用敏感 API）
-     *   Spring Security 配置：
-     *   .headers().contentTypeOptions().frameOptions().xssProtection()
-     *              .httpStrictTransportSecurity().referrerPolicy()
-     *              .permissionsPolicy()
+     * 五、权限模型
+     *   1) RBAC（基于角色）：用户 -> 角色 -> 权限
+     *      如：admin 角色 -> user:delete 权限
+     *      实现：Spring Security hasRole/hasAuthority
+     *   2) ABAC（基于属性）：根据用户/资源/环境属性动态判断
+     *      如：用户是部门 A 的，只能看部门 A 的数据
+     *      实现：自定义 PermissionEvaluator
+     *   3) ACL（访问控制列表）：每个资源配置可访问的用户列表
+     *      如：文档 D1 -> [user1 可读, user2 可写]
+     *   建议：简单场景 RBAC，复杂场景 RBAC + 数据权限（行级过滤）
      * =========================================================================
      */
 }

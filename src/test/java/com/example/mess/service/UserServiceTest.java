@@ -194,48 +194,76 @@ class UserServiceTest {
 
     /*
      * =========================================================================
-     * 【安全测试】Service 层安全场景测试（非可执行代码）
+     * 【DDD 测试策略】领域层测试金字塔（非可执行代码）
      * =========================================================================
      *
-     * 一、越权场景测试
-     *   1) 水平越权测试：
-     *      场景：用户 A（id=1）尝试删除用户 B（id=2）
-     *      预期：抛 AccessDeniedException 或返回失败
-     *      实现：mock currentUser(id=1)，调用 deleteUser(2L)，断言异常
-     *   2) 垂直越权测试：
-     *      场景：普通用户调用管理员方法
-     *      预期：Spring Security @PreAuthorize 拦截，403
-     *      实现：@WithMockUser(roles="USER") 调用 ADMIN 接口
+     * 一、DDD 各层的测试策略
+     *   领域层（实体/值对象/领域服务）：
+     *   - 纯业务逻辑，无框架依赖
+     *   - 测试：纯单元测试，无 Mock，无 Spring，毫秒级
+     *   - 示例：测试 User.changeEmail() 的业务规则
+     *     @Test void changeEmail_validEmail_updatesEmail() {
+     *       User user = new User("alice", "old@x.com");
+     *       user.changeEmail("new@x.com");
+     *       assertEquals("new@x.com", user.getEmail());
+     *     }
+     *   - 覆盖率要求：最高（>90%），业务规则不能有漏洞
      *
-     * 二、注入场景测试
-     *   1) SQL 注入测试：
-     *      输入：username = "alice' OR '1'='1"
-     *      预期：JPA 参数绑定，注入载荷作为普通字符串处理
-     *      验证：findByUsername("alice' OR '1'='1") 返回空，不是全表
-     *   2) XSS 测试：
-     *      输入：username = "<script>alert(1)</script>"
-     *      预期：存储原值或净化值，取决于策略
-     *      验证：查询返回的 username 不含可执行脚本（或已转义）
-     *   3) 路径穿越测试：
-     *      输入：email = "../../etc/passwd"
-     *      预期：@Email 校验拒绝，返回 400
+     *   应用层（应用服务/用例编排）：
+     *   - 编排逻辑，依赖领域层和仓储
+     *   - 测试：单元测试 + Mock 仓储，验证编排流程
+     *   - 本类 UserServiceTest 就是应用层测试
+     *   - 验证点：调了正确的仓储方法、事务边界正确、事件发布正确
      *
-     * 三、竞态场景测试
-     *   1) 重复创建测试：
-     *      场景：两个线程同时 createUser(相同 username)
-     *      预期：一个成功，另一个被数据库唯一约束拦截
-     *      实现：CountDownLatch + ExecutorService 并发调用，
-     *      断言恰好一个成功，一个抛 DataIntegrityViolationException
-     *   2) 重复删除测试（幂等）：
-     *      场景：连续两次 deleteUser(1L)
-     *      预期：第一次成功，第二次返回成功但无副作用（幂等）
-     *      或第二次抛 ResourceNotFoundException（取决于设计）
+     *   基础设施层（仓储实现/外部服务）：
+     *   - 技术实现，依赖 JPA/HTTP/MQ
+     *   - 测试：集成测试，@DataJpaTest + 真实数据库（Testcontainers）
+     *   - 验证点：SQL 正确、映射正确、事务正确
      *
-     * 四、边界值安全测试
-     *   1) 超长输入：username = "a".repeat(10000)，预期 400
-     *   2) 空值/null：username = null / "" / "   "，预期 400
-     *   3) 特殊字符：username = "\u0000\uFFFF"，预期 400 或净化
-     *   4) Unicode 欺骗：username = "аdmin"（西里尔字母 а），预期与 "admin" 不同
+     *   门面层（Controller/Listener）：
+     *   - 协议适配，依赖应用层
+     *   - 测试：切片测试 @WebMvcTest + @MockBean 应用服务
+     *   - 验证点：路由正确、参数绑定正确、序列化正确、状态码正确
+     *
+     * 二、测试替身（Test Double）分类
+     *   1) Mock：验证交互（调了什么方法、传了什么参数）
+     *      Mockito.when/verify 就是 Mock
+     *      适用：验证编排逻辑（应用服务调了仓储）
+     *   2) Stub：提供预设返回值（不验证交互）
+     *      Mockito.when(repo.findById(1L)).thenReturn(user) 就是 Stub
+     *      适用：为被测对象提供依赖数据
+     *   3) Spy：部分真实 + 部分打桩
+     *      @Spy 真实对象 + 覆盖部分方法
+     *      适用：测试真实逻辑但拦截副作用（如发邮件）
+     *   4) Fake：简化实现（如内存 UserRepository）
+     *      InMemoryUserRepository implements UserRepository
+     *      适用：领域层测试，不依赖 Mockito，更接近真实行为
+     *   5) Dummy：只占位，不使用
+     *      传 null 或空对象只为满足签名
+     *
+     * 三、Given-When-Then（BDD 风格）
+     *   与 Arrange-Act-Assert 本质相同，但用业务语言描述：
+     *   Given（假设）：一个已存在的用户，username 为 alice
+     *   When（当）：调用 findByUsername("alice")
+     *   Then（那么）：返回该用户，且 id 为 1
+     *   代码映射：
+     *   given(userRepository.findByUsername("alice")).willReturn(user);  // Given
+     *   User result = userService.findByUsername("alice");               // When
+     *   assertEquals(1L, result.getId());                                // Then
+     *   BDDMockito：given().willReturn() 替代 when().thenReturn()，语义更贴合 BDD
+     *
+     * 四、测试数据构建模式
+     *   1) Test Data Builder：
+     *      UserBuilder.anUser().withUsername("alice").withEmail("a@x.com").build()
+     *      优点：可读、可复用、默认值合理、按需覆盖
+     *   2) Object Mother：
+     *      UserFactory.alice() / UserFactory.bob()
+     *      优点：预定义角色化测试数据，语义清晰
+     *      缺点：角色膨胀后难维护
+     *   3) EasyRandom/Instancio：自动生成随机测试数据
+     *      优点：零模板代码
+     *      缺点：数据不可预测，断言困难，适合填充不关心字段
+     *   建议：核心实体用 Builder，辅助数据用随机生成
      * =========================================================================
      */
 }

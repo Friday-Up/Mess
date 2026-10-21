@@ -220,49 +220,69 @@ class UserControllerTest {
 
     /*
      * =========================================================================
-     * 【安全测试】API 安全测试场景（非可执行代码）
+     * 【API 测试】REST API 测试规范与文档化（非可执行代码）
      * =========================================================================
      *
-     * 一、认证测试矩阵
-     *   场景                          预期状态码   预期 message
-     *   无 Token 请求受保护接口         401        未认证
-     *   无效 Token 请求受保护接口        401        未认证
-     *   过期 Token 请求受保护接口        401        未认证
-     *   篡改 Token（改 payload）请求     401        未认证
-     *   有效 Token 请求受保护接口        200        正常响应
-     *   注意：401 message 统一"未认证"，不区分 Token 类型
+     * 一、API 测试的三个层次
+     *   1) 语法层：请求格式正确
+     *      - HTTP 方法正确（GET/POST/PUT/DELETE）
+     *      - Content-Type 正确（application/json）
+     *      - 请求体 JSON 格式合法
+     *   2) 语义层：业务含义正确
+     *      - 参数校验通过（@Valid）
+     *      - 资源存在性检查
+     *      - 权限检查
+     *      - 业务规则满足
+     *   3) 契约层：接口约定稳定
+     *      - 响应结构一致（ApiResponse 格式）
+     *      - 字段名/类型稳定
+     *      - 状态码语义正确
+     *      - 版本兼容（新增字段不破坏旧客户端）
      *
-     * 二、授权测试矩阵
-     *   场景                          预期状态码
-     *   USER 角色访问 GET /api/users    200（有权限）
-     *   USER 角色访问 DELETE /api/users/1  403（无权限，需 ADMIN）
-     *   ADMIN 角色访问所有接口           200
-     *   用户 A 访问用户 B 的数据         404（不泄露存在性）
-     *   测试工具：@WithMockUser(username="a", roles="USER")
-     *   或 MockMvcRequestPostProcessors.httpBasic("user", "password")
+     * 二、API 测试用例设计矩阵
+     *   每个接口按以下维度设计用例：
+     *   维度1 - 正常路径：
+     *     [ ] 合法参数 -> 200/201 + 正确 data
+     *   维度2 - 边界值：
+     *     [ ] 最小值/最大值/空值/超长值
+     *   维度3 - 异常路径：
+     *     [ ] 资源不存在 -> 404
+     *     [ ] 参数校验失败 -> 400
+     *     [ ] 未认证 -> 401
+     *     [ ] 无权限 -> 403
+     *     [ ] 唯一约束冲突 -> 409
+     *     [ ] 服务端异常 -> 500（不泄露堆栈）
+     *   维度4 - 幂等性：
+     *     [ ] 重复调用结果一致（GET/PUT/DELETE 天然幂等）
+     *     [ ] POST 重复提交 -> 幂等键去重或返回 409
+     *   维度5 - 并发：
+     *     [ ] 并发创建相同数据 -> 唯一约束兜底
+     *     [ ] 并发更新同一资源 -> 乐观锁/悲观锁
      *
-     * 三、输入校验安全测试
-     *   1) 缺少必填字段：POST /api/users body={"email":"a@x.com"}（无 username）
-     *      预期：400，message 含"username 不能为空"
-     *   2) 格式错误：POST /api/users body={"username":"a","email":"not-email"}
-     *      预期：400，@Email 校验失败
-     *   3) 超长字段：POST /api/users body={"username":"a".repeat(100),...}
-     *      预期：400，@Size(max=50) 校验失败
-     *   4) 类型错误：POST /api/users body={"username":12345}
-     *      预期：400，JSON 反序列化失败
+     * 三、API 文档即测试（Documentation as Test）
+     *   springdoc-openapi + Swagger UI：
+     *   1) 注解定义文档：@Operation(summary="查询用户") @ApiResponse(responseCode="200")
+     *   2) 自动生成 OpenAPI 规范（/v3/api-docs）
+     *   3) Swagger UI 交互式文档（/swagger-ui.html）
+     *   4) 契约验证：用 OpenAPI 规范验证响应是否符合文档
+     *      工具：spring-cloud-contract / swagger-request-validator
+     *   5) Mock 服务：前端用 OpenAPI 规范生成 Mock Server，前后端并行开发
+     *      工具：Prism / WireMock
      *
-     * 四、CSRF 测试
-     *   1) CSRF 启用时：POST 无 CSRF Token -> 403
-     *   2) CSRF 启用时：POST 带正确 CSRF Token -> 200
-     *   3) CSRF 启用时：POST 带错误 CSRF Token -> 403
-     *   4) 本项目禁用 CSRF（Token 认证），以上测试不适用
-     *      若恢复 CSRF，需全部补测
-     *   5) CSRF Token 测试：.with(csrf()) 自动生成有效 Token
-     *
-     * 五、速率限制测试
-     *   1) 连续请求 100 次，预期前 N 次成功，之后 429
-     *   2) 429 响应含 Retry-After 头
-     *   3) 不同 IP 的限流互不影响
+     * 四、E2E 测试工具链
+     *   1) REST Assured：Java API 测试框架，BDD 风格
+     *      given().param("page","0").when().get("/api/users")
+     *        .then().statusCode(200).body("data.size()",is(10));
+     *   2) Karate DSL：API 测试 + 性能测试 + Mock，BDD 语法
+     *      Given path '/api/users', 1
+     *      When method get
+     *      Then status 200
+     *      And match response == { id: 1, username: 'alice' }
+     *   3) Postman/Newman：API 手动测试 + CI 自动化（newman run collection.json）
+     *   4) k6：性能测试 + API 测试，JavaScript 脚本
+     *      http.get('http://localhost:8080/api/users');
+     *   5) Playwright/Cypress：前端 E2E，覆盖 API + UI 全链路
+     *   本项目当前用 MockMvc（单进程内），微服务后可引入 REST Assured/Karate
      * =========================================================================
      */
 }

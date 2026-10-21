@@ -41,40 +41,46 @@ public class MessApplication {
 
     /*
      * =========================================================================
-     * 【云原生部署】容器化与 K8s 部署指南（非可执行代码）
+     * 【架构演进】从单体到微服务的演进路线（非可执行代码）
      * =========================================================================
      *
-     * 一、Docker 化要点
-     *   1) 基础镜像：eclipse-temurin:17-jre-alpine（小体积，~80MB）
-     *      避免 full JDK 镜像（~400MB），生产只需 JRE
-     *   2) 非 root 运行：USER 1000:1000，容器内不用 root，降低逃逸风险
-     *   3) 健康检查：HEALTHCHECK CMD curl -f http://localhost:8080/actuator/health
-     *   4) 资源限制：docker run --memory=512m --cpus=1，防止单容器吃光主机资源
+     * 一、单体架构（当前状态）
+     *   特征：所有模块（用户/订单/支付）打包在一个 JAR/WAR 中
+     *   优点：开发简单、部署简单、调试方便、事务一致性容易
+     *   缺点：代码膨胀后构建慢、模块耦合、技术栈单一、扩展只能整体扩展
+     *   适用：初创期、团队 <10 人、业务快速试错阶段
      *
-     * 二、K8s 部署配置
-     *   1) 健康探针：
-     *      livenessProbe: /actuator/health/liveness（进程活着？失败重启 Pod）
-     *      readinessProbe: /actuator/health/readiness（能接流量？失败摘除流量）
-     *      startupProbe: 失败阈值 30，间隔 10s（给慢启动应用时间）
-     *   2) 资源配额：
-     *      requests: cpu=250m, memory=512Mi（调度依据）
-     *      limits: cpu=1000m, memory=1Gi（硬上限，超限 OOMKill）
-     *   3) 优雅停机：
-     *      server.shutdown=graceful（接收 SIGTERM 后停止接新请求）
-     *      spring.lifecycle.timeout-per-shutdown-phase=30s
-     *      terminationGracePeriodSeconds: 30（K8s 等 30s 再强杀）
+     * 二、模块化单体（Modular Monolith，推荐的第一步演进）
+     *   特征：仍是单体部署，但代码按业务域严格分模块
+     *   规则：
+     *   1) 每个模块有明确的边界（包结构：com.example.mess.user / order / payment）
+     *   2) 模块间只通过公开接口通信，不直接访问其他模块的内部类
+     *   3) 每个模块有独立的数据库表，不跨模块 JOIN
+     *   4) 模块间事件通信：ApplicationEventPublisher + @EventListener
+     *   优点：保留单体部署简单性，同时获得模块边界的可拆分性
+     *   演进成本：低，只需重构包结构和依赖关系
      *
-     * 三、配置外部化（12-Factor App）
-     *   1) 环境变量：spring.datasource.url 从 env 注入，不打进镜像
-     *   2) ConfigMap：非敏感配置（日志级别/线程池大小）
-     *   3) Secret：敏感配置（数据库密码/JWT 密钥），base64 编码非加密
-     *   4) 配置中心：Nacos/Apollo 动态配置，免重新部署
+     * 三、微服务架构（业务规模足够大时）
+     *   特征：每个业务域独立部署、独立数据库、独立技术栈
+     *   拆分依据：DDD 限界上下文（Bounded Context）
+     *   通信方式：
+     *   1) 同步：REST/gRPC（服务间直接调用，简单但耦合）
+     *   2) 异步：消息队列（Kafka/RocketMQ，解耦但最终一致）
+     *   3) 事件驱动：领域事件 + 事件溯源（最解耦，最复杂）
+     *   基础设施需求：
+     *   - 服务注册发现：Nacos/Eureka/Consul
+     *   - 配置中心：Nacos/Apollo
+     *   - API 网关：Spring Cloud Gateway
+     *   - 链路追踪：SkyWalking/Zipkin
+     *   - 分布式事务：Seata/消息事务
+     *   - 容器编排：Kubernetes
      *
-     * 四、镜像安全
-     *   1) 镜像扫描：Trivy/Grype 扫描 CVE 漏洞
-     *   2) 最小化镜像：distroless 或 scratch，无 shell 无包管理器
-     *   3) 镜像签名：cosign 签名，K8s 准入控制器验证签名
-     *   4) 私有仓库：Harbor，带漏洞扫描和镜像策略
+     * 四、演进原则（Martin Fowler 的 Strangler Fig 模式）
+     *   1) 不要一次性重写：绞杀者模式，逐步用新服务替换旧模块
+     *   2) 先模块化再微服务化：单体内部先划清边界，再按边界拆出
+     *   3) 数据先行：先拆数据库，再拆服务（数据耦合是最难拆的）
+     *   4) 双写过渡：新旧并行运行，流量逐步切换，验证后下线旧模块
+     *   5) 拆分收益 > 拆分成本时才拆：微服务不是银弹，分布式复杂性代价高
      * =========================================================================
      */
 }

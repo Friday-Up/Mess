@@ -56,45 +56,59 @@ class MessApplicationTests {
 
     /*
      * =========================================================================
-     * 【安全测试】SAST/DAST/渗透测试概览（非可执行代码）
+     * 【微服务测试】契约测试与消费者驱动契约（CDC）（非可执行代码）
      * =========================================================================
      *
-     * 一、安全测试三层体系
-     *   1) SAST（静态应用安全测试）：代码级扫描，CI 集成
-     *      工具：SonarQube（代码质量+部分安全规则）/ SpotBugs+FindSecBugs / Semgrep
-     *      检测：硬编码密码/SQL 注入/不安全的反序列化/弱加密算法
-     *      集成：CI 流水线 PR 阶段自动扫描，高危阻断合并
+     * 一、微服务测试的挑战
+     *   单体：集成测试覆盖全链路（同进程）
+     *   微服务：服务独立部署/独立测试，跨服务集成测试困难
+     *   问题：服务 A 依赖服务 B 的 API，B 改了 API，A 不知道，上线后故障
      *
-     *   2) DAST（动态应用安全测试）：运行时扫描，部署后执行
-     *      工具：OWASP ZAP（开源）/ Burp Suite（商业）
-     *      检测：XSS/CSRF/注入/配置错误/敏感信息泄露
-     *      集成：测试环境每周全量扫描，生产环境不扫描（有风险）
+     * 二、消费者驱动契约测试（Consumer-Driven Contract Testing）
+     *   核心思想：消费者（A）定义契约，提供者（B）遵守契约
+     *   流程：
+     *   1) 消费者 A 编写契约：定义期望 B 的响应格式
+     *      Pact DSL：uponReceiving("get user by id")
+     *                .path("/api/users/1")
+     *                .willRespondWith(200, body:{id:1, username:"alice"})
+     *   2) 消费者 A 运行契约测试：用 Mock Provider 验证 A 的逻辑
+     *   3) 契约发布：A 的契约发布到 Pact Broker
+     *   4) 提供者 B 验证契约：B 拉取 A 的契约，用真实服务验证是否满足
+     *   5) CI 阻断：B 的改动若违反 A 的契约，CI 失败，阻止合并
+     *   工具：Pact（多语言）/ Spring Cloud Contract（Spring 生态）
      *
-     *   3) 渗透测试：人工模拟攻击，定期执行
-     *      频率：核心系统每半年一次，新系统上线前一次
-     *      范围：认证/授权/注入/配置/业务逻辑漏洞
-     *      产出：渗透测试报告 + 漏洞修复跟踪
+     * 三、Spring Cloud Contract
+     *   提供者（B）编写契约（Groovy DSL）：
+     *   Contract.make {
+     *     request { method 'GET'; url '/api/users/1' }
+     *     response { status 200; body([id: 1, username: 'alice']) }
+     *   }
+     *   提供者 CI：自动生成验证测试，确保真实 API 满足契约
+     *   消费者（A）：提供者发布 stub jar，A 用 stub 做集成测试
+     *   A 的测试：@AutoConfigureStubRunner(ids="com.example:user-service:+:stubs")
      *
-     * 二、依赖漏洞扫描（SCA - 软件成分分析）
-     *   1) OWASP Dependency-Check：Maven 插件，扫描依赖 CVE
-     *      <plugin>org.owasp:dependency-check-maven</plugin>
-     *      mvn org.owasp:dependency-check-maven:check
-     *   2) Snyk：商业工具，CI 集成，自动提 PR 升级有漏洞依赖
-     *   3) GitHub Dependabot：GitHub 原生，自动检测依赖漏洞并提 PR
-     *   4) 处理策略：高危 CVE 立即升级；中危排期修复；低危记录跟踪
+     * 四、测试策略对比
+     *   1) 单元测试：Mock 依赖，验证单个类/方法的逻辑（快）
+     *   2) 切片测试：@WebMvcTest/@DataJpaTest，验证单层（较快）
+     *   3) 集成测试：@SpringBootTest，验证模块内全链路（慢）
+     *   4) 契约测试：验证服务间接口契约（中速，CI 必备）
+     *   5) 端到端测试：真实部署全链路验证（最慢，少量关键场景）
+     *   6) 混沌工程：故意注入故障（网络延迟/服务宕机），验证系统韧性
+     *      工具：Chaos Monkey for Spring Boot / Chaos Mesh
+     *   策略：单元测试最多（70%），集成测试次之（20%），E2E 最少（10%）
      *
-     * 三、安全测试用例设计
-     *   认证测试：
-     *   [ ] 空/错误凭证返回 401，message 不区分用户名/密码错误
-     *   [ ] 连续失败 5 次锁定 15 分钟
-     *   [ ] 锁定期间正确密码也返回 401
-     *   授权测试：
-     *   [ ] 普通用户访问管理接口返回 403（或 404）
-     *   [ ] 用户 A 访问用户 B 的数据返回 404（防越权）
-     *   输入测试：
-     *   [ ] SQL 注入载荷（' OR 1=1 --）返回 400，不入库
-     *   [ ] XSS 载荷（<script>alert(1)</script>）被净化或拒绝
-     *   [ ] 超长输入（10MB）返回 400，不 OOM
+     * 五、Testcontainers（真实依赖集成测试）
+     *   问题：H2 内存库与 MySQL 行为不一致（函数/DDL/隔离级别差异）
+     *   方案：Testcontainers 启动真实 Docker 容器做测试
+     *   @Testcontainers
+     *   @Container
+     *   static MySQLContainer<?> mysql = new MySQLContainer<>("mysql:8.0");
+     *   @DynamicPropertySource
+     *   static void props(DynamicPropertyRegistry r) {
+     *     r.add("spring.datasource.url", mysql::getJdbcUrl);
+     *   }
+     *   好处：测试环境与生产一致（真实 MySQL/Redis/Kafka），减少"本地通过生产挂"
+     *   成本：需要 Docker 环境，CI 需支持 Docker-in-Docker
      * =========================================================================
      */
 }
