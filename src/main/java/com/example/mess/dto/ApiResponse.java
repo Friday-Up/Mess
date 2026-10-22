@@ -205,49 +205,62 @@ public class ApiResponse<T> {
 
     /*
      * =========================================================================
-     * 【分布式系统】响应契约与最终一致性（非可执行代码）
+     * 【Spring 内幕】HttpMessageConverter 内容协商与消息写出流水线（非可执行代码）
      * =========================================================================
      *
-     * 一、分布式系统的响应语义
-     *   单体中：方法调用 = 同步返回，成功/失败立即知道
-     *   分布式中：服务间调用可能超时/重试/部分失败，响应语义更复杂：
-     *   1) 同步响应：调用方等待返回（REST/gRPC），超时需处理
-     *   2) 异步确认：返回"已接收"，结果通过回调/消息通知（MQ）
-     *   3) 幂等响应：同一请求重复调用返回相同结果（重试安全）
-     *   ApiResponse 需扩展以支持这些场景：
-     *   - 增加 requestId 字段：幂等键，重复请求返回首次结果
-     *   - 增加 status 字段：PENDING/PROCESSING/COMPLETED/FAILED（异步场景）
-     *   - 增加 retryAfter 字段：429 限流时告知重试时间
+     * 一、本类对象是怎么变成 HTTP 响应 JSON 的（RequestMappingHandlerAdapter）
+     *   1) Controller 方法返回 ApiResponse 后，
+     *      RequestResponseBodyMethodProcessor 接手（识别 @ResponseBody）
+     *   2) chooseProcessor：按返回值类型挑 HttpMessageConverter
+     *      - 默认注册顺序：ByteArrayHttpMessageConverter -> StringHttpMessageConverter
+     *        -> ResourceHttpMessageConverter -> MappingJackson2HttpMessageConverter 等
+     *      - ApiResponse 是对象类型 -> 落到 MappingJackson2HttpMessageConverter
+     *   3) 内容协商（ContentNegotiationManager）决定 ContentType：
+     *      - 请求头 Accept: application/json -> 返回 JSON
+     *      - Accept: ＊/＊ -> 回退到处理器默认（JSON）
+     *      - 客户端支持时也可按 URL 后缀切换（默认关闭后缀协商）
+     *   4) MappingJackson2HttpMessageConverter.write：
+     *      内部委托 ObjectMapper.writeValue(outputStream, this) 序列化
+     *   5) 写出响应体 -> 状态码 200 -> 线程回池
      *
-     * 二、CAP 定理与一致性选择
-     *   CAP：一致性(C)/可用性(A)/分区容忍(P) 三者不可兼得
-     *   分布式系统只能选 CP 或 AP：
-     *   - CP（强一致）：ZooKeeper/etcd，分区时拒绝写入保证一致
-     *   - AP（高可用）：Eureka/Cassandra，分区时仍可写入，最终一致
-     *   业务系统通常选 AP + 最终一致性：
-     *   - 用户注册：写入主库后立即返回成功（AP），从库异步同步（最终一致）
-     *   - 订单支付：强一致要求高，用 TCC/Seata 保证（CP 倾向）
-     *   - 商品浏览：可容忍秒级延迟，用缓存 + 最终一致（AP）
+     * 二、请求体的对称路径（@RequestBody 的反序列化）
+     *   RequestResponseBodyMethodProcessor.readBody：
+     *   1) 取请求 Content-Type（如 application/json）
+     *   2) canRead 返回 true 的第一个 Converter -> Jackson
+     *   3) ObjectMapper.readValue(body, UserDto.class) -> 注入方法参数
+     *   4) 解析失败：HttpMessageNotReadableException（被全局异常处理器转 400）
      *
-     * 三、分布式事务模式
-     *   1) 2PC（两阶段提交）：强一致，性能差，阻塞
-     *   2) TCC（Try-Confirm-Cancel）：业务级两阶段，每个操作需实现三个方法
-     *   3) Saga：长事务拆分为多个本地事务 + 补偿操作
-     *      正向：创建订单 -> 扣库存 -> 扣余额
-     *      补偿：取消订单 -> 恢复库存 -> 恢复余额
-     *   4) 本地消息表（Transactional Outbox）：
-     *      业务操作和消息写入同一本地事务，后台任务扫描发送
-     *      保证"业务成功则消息一定发出"
-     *   5) 事件溯源（Event Sourcing）：状态 = 事件序列，重建状态靠回放
+     * 三、Jackson ObjectMapper 的线程安全与复用
+     *   - 配置一次后是线程安全的（推荐作为单例 Bean）
+     *   - 用户自定义 Bean：@Bean ObjectMapper 进入容器会覆盖默认配置
+     *   - Jackson2ObjectMapperBuilder 支持标准化定制（日期、空值、命名策略）
+     *   本类的 timestamp 序列化为 ISO 字符串即 Spring Boot 默认配置
+     *   （spring.jackson.serialization.write-dates-as-timestamps=false）
      *
-     * 四、幂等性设计（重试安全）
-     *   场景：网络超时 -> 调用方重试 -> 服务端可能已处理过
-     *   方案：
-     *   1) 幂等键：客户端生成 requestId，服务端 Redis SETNX 去重
-     *   2) 数据库唯一约束：重复插入抛异常，catch 后返回首次结果
-     *   3) 乐观锁：@Version，重复更新抛异常
-     *   4) 状态机：只允许合法状态转换，重复请求状态不变即幂等
-     *   GET/PUT/DELETE 天然幂等，POST 需显式设计幂等
+     * 四、性能视角：序列化在 HTTP 请求耗时中的占比
+     *   - 小对象（如本类）序列化耗时可忽略（微秒级）
+     *   - 列表/深层嵌套（Page<UserDto>）反射逐字段遍历，耗时随规模线性增长
+     *   - 大列表优化方向：DTO 精简字段、使用 @JsonInclude(NON_NULL) 去空、
+     *     或换用更快的序列化器（Jackson Afterburner / Protobuf）
+     *
+     * 五、泛型保留的机制：为什么前端能拿到 $.data.username
+     *   1) Java 泛型运行时擦除：ApiResponse<UserDto>.class 只是 ApiResponse.class
+     *   2) Spring 如何保留泛型：RequestResponseBodyMethodProcessor 从
+     *      MethodParameter 取 GenericReturnType（含 ParameterizedType），
+     *      递归解析到 UserDto；Jackson 用 JavaType 而非 Class 选择序列化器；
+     *      这就是 Page<UserDto> 内层字段不变成 LinkedHashMap 的根因
+     *   3) 反例：手动 ObjectMapper.convertValue(apiResponse, ApiResponse.class)
+     *      擦除后 data 只会成为 LinkedHashMap，字段需要字符串 key 访问
+     *   4) 修复方式：TypeReference<ApiResponse<UserDto>>(){} 或 JavaType 工厂
+     *   5) 配套规范：前端统一从 $.data 取数据，$.message 提示，$.success 分支
+     *
+     * 六、响应压缩与缓存头的框架层配合
+     *   1) server.compression.enabled=true + mime-types=application/json
+     *      由内嵌 Tomcat 的 CompressionFilter 完成 gzip，框架层零代码
+     *   2) 本类 timestamp 字段可用于客户端条件请求：>If-Modified-Since
+     *      但本项目未启用 ETag，纯文本 API 收益有限
+     *   3) 响应体大小与序列化耗时的关系：小对象压缩反而变慢，
+     *      生产环境建议 min-response-size=2KB 起步
      * =========================================================================
      */
 }

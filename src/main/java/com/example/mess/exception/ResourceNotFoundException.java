@@ -60,60 +60,51 @@ public class ResourceNotFoundException extends RuntimeException {
 
     /*
      * =========================================================================
-     * 【DDD 领域事件】异常即事件的设计思路（非可执行代码）
+     * 【Spring 内幕】异常在代理层穿透的机制与调用链还原（非可执行代码）
      * =========================================================================
      *
-     * 一、领域事件 vs 异常
-     *   异常：同步的、局部的、调用方必须处理
-     *   事件：异步的、广播的、订阅方按需处理
-     *   两者可以互补：
-     *   - 同步路径用异常：资源不存在 -> 抛 ResourceNotFoundException -> 404
-     *   - 异步路径用事件：资源不存在 -> 发布 ResourceNotFoundEvent -> 审计/监控
+     * 一、为什么 Service 直接 throw，Controller 不需要 try-catch
+     *   本异常是 unchecked（继承 RuntimeException）：
+     *   1) Java 方法签名无需 throws 声明（unchecked 不强制）
+     *   2) Spring 代理层不包装：默认情况下 JdkDynamicAopProxy 直接
+     *      rethrow 原异常（只对 checked 用 UndeclaredThrowableException 包装）
+     *   3) 异常沿栈向上穿过 UserService 代理 -> UserController -> DispatcherServlet
+     *      -> HandlerExceptionResolver -> GlobalExceptionHandler 命中 @ExceptionHandler
+     *   -> 全程无需手写 try-catch，代码保持平铺直线
      *
-     * 二、事件驱动架构（EDA）
-     *   核心思想：服务间通过事件解耦，不直接调用
-     *   对比：
-     *   请求-响应（同步）：订单服务调用户服务 GET /api/users/1
-     *     耦合：订单服务依赖用户服务可用性
-     *   事件驱动（异步）：用户服务发布 UserCreated 事件到 Kafka，
-     *     订单服务订阅事件维护本地用户缓存
-     *     解耦：用户服务不关心谁消费，订单服务不依赖用户服务可用性
+     * 二、异常链与堆栈：谁抛的如何保留
+     *   - 发生点：orElseThrow(() -> new ResourceNotFoundException(用户不存在))
+     *     堆栈从 lambda 调用处开始，清晰指向 Service 代码行
+     *   - 异常被 GlobalExceptionHandler 接住时仍保留完整栈
+     *   - 生产建议：本异常不应在日志中打印 ERROR 级（业务可控），DEBUG 即可，
+     *     防止日志洪泛（恶意高频访问不存在的 ID 会与 NPE 一样刷屏）
      *
-     * 三、事件分类
-     *   1) 领域事件（Domain Event）：业务上有意义的事实
-     *      UserCreated / UserEmailChanged / UserDeleted
-     *      特征：过去时态、不可变、包含关键业务数据
-     *   2) 集成事件（Integration Event）：跨服务通信的事件
-     *      与领域事件的区别：集成事件是领域事件的对外发布格式
-     *      领域事件：UserCreated(userId, username, timestamp) - 内部
-     *      集成事件：UserCreatedEvent(userId, username, email, timestamp, eventId) - 对外
-     *      集成事件需含 eventId（幂等去重）、eventTime（排序）、schema 版本
-     *   3) 通知事件（Notification Event）：只告知"发生了"，不含数据
-     *      UserChanged(userId) - 消费方需回调查询最新数据
-     *      优点：事件小；缺点：消费方需反查
+     * 三、JDK 反射方法调用对异常的处理
+     *   1) Method.invoke 会把目标方法里的 checked 异常包成
+     *      InvocationTargetException（它保留 target 指向原始 checked 异常）
+     *   2) unchecked（如本 RuntimeException）则直接抛出，不会包装
+     *   3) AOP 拦截链调用 proceed() -> ReflectiveMethodInvocation 接住
+     *      InvocationTargetException -> 取 getCause 再向上抛 -> 去掉包装
+     *   所以本异常能光溜溜冒到 Controller 是 AOP 链特意做的扁平化处理
      *
-     * 四、事件溯源（Event Sourcing）
-     *   传统：状态 = 当前数据库值（只存最新状态）
-     *   事件溯源：状态 = 事件序列的回放结果（存所有事件）
-     *   示例：
-     *   传统：User(username="alice", email="new@x.com") - 只存最新
-     *   事件溯源：
-     *     UserCreated(id=1, username="alice", email="old@x.com")
-     *     UserEmailChanged(id=1, email="new@x.com")
-     *     -> 回放两个事件得到当前状态
-     *   优点：完整审计日志、时间旅行（任意时刻状态）、天然事件驱动
-     *   缺点：查询复杂（需 CQRS 读模型）、事件模式演进困难、存储量大
-     *   适用：金融交易、审计要求高的场景
-     *   实现：Axon Framework / 自建（事件表 + 快照）
+     * 四、自定义异常的设计原则小结
+     *   - 语义化：资源不存在 -> 404（前端可据此提示友好信息）
+     *   - 可扩展：继承 RuntimeException，支持 message + cause（本类两个构造器）
+     *   - 不滥用：只在业务可预期时使用；编程错误（NPE/数组越界）
+     *     不应被捕获成业务异常，否则掩盖真实 Bug
+     *   - 可测试：测试中可以 assertThrows(ResourceNotFoundException.class, ...)
+     *     （参照 UserServiceTest 中的测试用例）
      *
-     * 五、发件箱模式（Transactional Outbox）
-     *   问题：数据库提交成功但消息发送失败（或反之），数据与消息不一致
-     *   方案：业务数据和事件写入同一数据库事务
-     *   1) 业务操作：UPDATE user SET email='new@x.com'
-     *   2) 写发件箱：INSERT INTO outbox(event_type, payload, status) VALUES(...)
-     *   3) 后台任务：轮询 outbox 表，发送到 Kafka，标记已发送
-     *   4) 保证：业务成功 <=> 事件一定发出（同一事务）
-     *   进阶：Debezium CDC 监听 outbox 表 binlog，实时发送到 Kafka
+     * 五、异常与日志框架的联动实践
+     *   1) 本异常的日志策略：业务可控的找不到应记 WARN/INFO 而非 ERROR，
+     *      否则会触发告警风暴（PagerDuty/钉钉）
+     *   2) 堆栈打印的代价：fillInStackTrace 约几百微秒，高频构造同异常时可
+     *      覆盖 fillInStackTrace 返回 this（慎用，会丢失排错信息）
+     *   3) 脱敏：message 不要拼接手机号/邮箱等敏感信息
+     *   4) 与监控联动：GlobalExceptionHandler 里用 Micrometer Counter 打点，
+     *      tag 含 exception_type 与 status，看板可见 404 趋势
+     *   5) 404 突然激增常是前端传参变更或数据迁移导致——异常也是
+     *      Observability 的重要信号，不只是错误
      * =========================================================================
      */
 }

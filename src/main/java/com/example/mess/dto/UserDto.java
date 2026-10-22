@@ -123,49 +123,58 @@ public class UserDto {
 
     /*
      * =========================================================================
-     * 【DDD 上下文映射】DTO 作为防腐层（ACL）（非可执行代码）
+     * 【Spring 内幕】Jackson 序列化内幕：泛型、反射与序列化器缓存（非可执行代码）
      * =========================================================================
      *
-     * 一、限界上下文（Bounded Context）
-     *   定义：一个业务模型的适用边界，同一术语在不同上下文有不同含义
-     *   示例：
-     *   - 用户上下文：User = 注册用户（含密码/角色/登录态）
-     *   - 订单上下文：User = 下单人（只需 id/昵称/收货地址）
-     *   - 营销上下文：User = 营销对象（只需 id/标签/手机号）
-     *   同一个"用户"在不同上下文中的模型不同，不应共享同一个 User 类
+     * 一、为什么 DTO 要与 Entity 分离（内存与框架层理由）
+     *   - Jackson 序列化 DTO 时基于反射读取 getter，默认只认字段顺序
+     *   - Entity 如果直接输出，会触发关联关系加载（@OneToMany 懒加载代理
+     *     也可能被序列化 -> 诱发 N+1 查询和 LazyInitializationException）
+     *   - DTO 拷贝（本类字段均为简单类型）让序列化边界清晰可控，
+     *     且能自由调整字段顺序或隐藏内部字段
      *
-     * 二、上下文映射（Context Mapping）模式
-     *   1) 防腐层（Anti-Corruption Layer，ACL）：
-     *      下游上下文不直接使用上游模型，通过翻译层转换
-     *      DTO 就是防腐层的实现：上游 User -> 下游 OrderUserDto
-     *      作用：上游模型变更不影响下游业务逻辑
-     *   2) 共享内核（Shared Kernel）：
-     *      两个上下文共享一部分模型（如共用的值对象 Money）
-     *      风险：共享部分变更影响双方，需协商
-     *   3) 客户-供应商（Customer-Supplier）：
-     *      上游优先，下游适配（如订单上下文适配用户上下文的 API）
-     *   4) 遵奉者（Conformist）：
-     *      下游无条件遵从上游模型（上游强势，无法协商）
-     *   5) 开放主机服务（Open Host Service）：
-     *      上游提供标准化 API/协议（如 RESTful + OpenAPI 规范）
-     *   6) 发布语言（Published Language）：
-     *      上游发布标准化的数据格式（如 JSON Schema/Avro/Protobuf）
+     * 二、ObjectMapper 写出一个 UserDto 的完整过程
+     *   1) writeValueAsString(dto)：查找 BeanSerializer
+     *   2) BeanSerializer 通过 SerializerCache 查 UserDto 类 -> 自定义或默认
+     *   3) JacksonIntrospector 扫描 public getter/getterField -> BeanPropertyDefinition
+     *      - @JsonProperty 改变字段名；@JsonIgnore 排除字段
+     *      - 本类未加注解 -> 默认所有 getter 逐一输出
+     *   4) 对 Long id：LongSerializer（Jackson 内置）；对 null 字段：NullSerializer
+     *   5) 合成 JSON 字符串，写入 Writer
+     *   关键点：序列化器是按 Class 缓存（ConcurrentHashMap），首次反射慢，
+     *   之后复用 -> 高频接口性能靠类稳定，避免每次动态生成
      *
-     * 三、本类在上下文映射中的角色
-     *   UserDto 是用户上下文对外发布的"发布语言"：
-     *   1) 对外契约：前端/API 消费者依赖 UserDto 的结构，不依赖 User 实体
-     *   2) 字段裁剪：只暴露用户上下文愿意发布的字段
-     *   3) 版本演进：UserDto 加字段向后兼容，删字段需版本化（v2）
-     *   4) 微服务拆分后：订单服务通过用户服务的 API 获取 UserDto，
-     *      订单服务内部有自己的 OrderUserDto（防腐层翻译）
+     * 三、反序列化的对称流程（POST /api/users 的 @RequestBody）
+     *   1) readValue(json, UserDto.class)：JsonParser 流式读取
+     *   2) 按类的默认构造函数实例化（要求有无参构造，Jackson 的隐含契约）
+     *   3) 逐字段 setter 或字段直写（默认字段可见性规则）
+     *   4) 失败行为：JsonProcessingException -> 由 HttpMessageConverter 包装，
+     *      最终被 GlobalExceptionHandler 转为 400
+     *   进阶：JSON 转换默认不校验业务规则 -> DTO 上需要显式 @Valid 注解
      *
-     * 四、CQRS（命令查询职责分离）
-     *   命令（写）和查询（读）使用不同的模型：
-     *   - 命令模型：User 实体（含业务规则/校验/状态变更）
-     *   - 查询模型：UserDto/UserView（只读，可从读库/缓存/物化视图查询）
-     *   - 命令走 Service -> Repository -> 写库
-     *   - 查询可直接走查询服务 -> 读库/ES/缓存，不经过聚合根
-     *   - 本项目当前读写共用 User 实体，数据量大后可引入 CQRS
+     * 四、泛型与 TypeReference：为什么 List<UserDto> 需要特殊处理
+     *   Jackson 处理 List.class 时无法推断元素类型（泛型擦除），
+     *   所以必须传 TypeReference<List<UserDto>> 或 JavaType；
+     *   Spring 的 MethodParameter 在方法签名里保留了泛型信息，
+     *   这就是 ObjectMapper 能正确序列化 Page<UserDto> 的根本原因
+     *
+     * 五、Java 17+ record 的演进对比
+     *   1) record 是不可变数据载体：编译器生成全参构造/getter/equals/hashCode
+     *   2) 传统 DTO（本类）vs record 的本质差异：DTO 可变、Jackson 需无参构造；
+     *      record 不可变、反序列化走 canonical 构造（Jackson 2.12+ 原生支持）
+     *   3) 性能上 record 字段直接访问，少了反射 setter 的开销
+     *   4) 可读性上 record 更接近纯数据表达，适合值对象语义
+     *   5) 兼容性：record 隐式 final 不能被继承，与 @JsonProperty 等注解可共存，
+     *      但有动态属性（如 @ConfigurationProperties）时不适合 record
+     *   6) 本项目保持传统 DTO：兼容 ModelMapper 等工具，迁移需评估全部依赖点
+     *
+     * 六、Bean Validation 与 @Valid 的框架层机制
+     *   1) 参数前加 @Valid -> RequestResponseBodyMethodProcessor 触发 Validator
+     *   2) 校验失败抛 MethodArgumentNotValidException -> 400（需 Advice 捕获）
+     *   3) 常用注解：@NotNull/@NotBlank/@Size(max=50)/@Email/@Pattern
+     *   4) 分组校验：@Validated(Create.class) 区分新增与更新的校验规则
+     *   5) 本类当前未加校验注解，UserService 手动检查用户名/邮箱唯一，
+     *      引入 @Valid 后可把唯一性外的格式校验下沉到 DTO 层
      * =========================================================================
      */
 }

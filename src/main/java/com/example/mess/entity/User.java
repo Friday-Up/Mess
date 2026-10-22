@@ -148,48 +148,69 @@ public class User {
 
     /*
      * =========================================================================
-     * 【DDD 战术模式】实体 vs 值对象 vs 聚合根（非可执行代码）
+     * 【Spring 内幕】JPA 实体生命周期与持久化上下文的脏检查机制（非可执行代码）
      * =========================================================================
      *
-     * 一、DDD 核心概念映射
-     *   实体（Entity）：有唯一标识，状态可变，生命周期内标识不变
-     *     -> 本类 User 就是实体：id 是唯一标识，username/email 可变
-     *   值对象（Value Object）：无唯一标识，通过属性值判等，不可变
-     *     -> 如 Email、Money、Address 应设计为值对象
-     *     -> 判等：两个 Email("a@x.com") 相等，无需 id
-     *     -> 实现：Java record 或不可变类 + equals/hashCode 基于字段
-     *   聚合根（Aggregate Root）：聚合的入口实体，外部只能通过聚合根访问聚合内对象
-     *     -> 如 Order（聚合根）包含 OrderItem（聚合内实体），
-     *        外部不能直接操作 OrderItem，必须通过 Order
-     *     -> 本类 User 当前是独立实体，若加入 UserAddress/UserProfile，
-     *        User 应升级为聚合根，地址/档案作为聚合内对象
+     * 一、实体四种状态与转换触发点（Hibernate 6.x）
+     *   1) new/transient：new User() 后，尚未与 EntityManager 关联
+     *   2) managed：save()/persist() 或 findById() 后，处于持久化上下文
+     *   3) detached：上下文关闭/clear/evict 后，丢失关联但保留数据
+     *   4) removed：调用 remove() 后，等待 flush 时执行 DELETE
+     *   本项目的 save() 实现来自 SimpleJpaRepository：
+     *   - 仅当实体主键为 null 时调用 entityManager.persist（新增）
+     *   - 已有主键则调用 merge -> 产生复制到托管副本的效果
+     *   这就是写代码时 save 既能新增也能更新的容器层原因
      *
-     * 二、聚合设计原则
-     *   1) 聚合要小：一个聚合只包含必须保持一致性的对象
-     *      反模式：Order 聚合包含 Customer（跨聚合引用），应改为存 customerId
-     *   2) 聚合间只引用 ID：Order 存 customerId，不存 Customer 对象
-     *   3) 一个事务只修改一个聚合：跨聚合一致性用领域事件（最终一致）
-     *   4) 聚合边界 = 事务边界：聚合内强一致，聚合间最终一致
+     * 二、脏检查与最小变更 UPDATE：不用写 UPDATE 也能更新字段
+     *   事务内：
+     *   1) 加载：findById -> User 进入持久化上下文，快照副本同时保存
+     *   2) 业务修改：setter 赋值（本类 setEmail/setName 等）
+     *   3) flush（事务提交或手动 flush 时）：
+     *      Hibernate 比较当前实体与快照 -> email 变了
+     *      -> 生成 UPDATE USER SET email=? WHERE id=?
+     *      仅 changed 字段参与 SET（@DynamicUpdate 时，否则全字段）
+     *   4) 事务提交 -> DB 生效
+     *   注意：事务外的 setter 修改不会触发 update（实体已 detached）
      *
-     * 三、领域事件（Domain Event）
-     *   定义：业务上有意义的、已发生的事实，用于跨聚合/跨服务通信
-     *   命名：过去时态（UserCreated / UserDeleted / UserEmailChanged）
-     *   实现：
-     *   1) 定义事件类：public record UserCreated(Long userId, String username) {}
-     *   2) 发布：ApplicationEventPublisher.publishEvent(new UserCreated(...))
-     *   3) 监听：@EventListener + @TransactionalEventListener(phase=AFTER_COMMIT)
-     *   4) 跨服务：事件发布到 Kafka/RocketMQ，其他服务消费
-     *   事务边界：
-     *   - @EventListener：同事务执行，监听器失败回滚主事务
-     *   - @TransactionalEventListener(AFTER_COMMIT)：事务提交后执行，
-     *     监听器失败不影响主事务，但可能丢事件（需重试/发件箱模式）
+     * 三、一级缓存（PersistenceContext）与重复查询的省钱机制
+     *   同一事务/上下文中：
+     *   1) findById(1L) -> 查库 -> 实体与快照入上下文
+     *   2) 再次 findById(1L) -> 直接命中上下文缓存，不查库
+     *   3) findByUsername 不同路径（JPQL/原生 SQL）默认绕开一级缓存，
+     *      会查库并按主键返回上下文中已有托管对象（保证引用同一）
+     *   一级缓存生命周期 = EntityManager 生命周期 = 一个事务（通常勿跨事务共享）
      *
-     * 四、仓储模式（Repository Pattern）
-     *   DDD 中 Repository 是聚合根的集合接口，不是 DAO：
-     *   - 面向聚合根：UserRepository 管理 User 聚合，不管理 UserAddress
-     *   - 语义化方法：findByUsername 而非 selectByCondition
-     *   - 隐藏持久化细节：调用方不知道是 JPA/MyBatis/内存
-     *   - 本项目 UserRepository 已符合该模式
+     * 四、flush 的隐式触发时机（最容易被忽略的边界）
+     *   - 事务提交前 commit -> flush
+     *   - 执行同类或带查询方法的 JPQL/SQL 查询前（auto flush）
+     *   - 手动调用 EntityManager.flush()
+     *   - saveAndFlush() 常见用途：立即写入数据库，便于立刻验证唯一约束
+     *
+     * 五、N+1 问题与本项目的预防点
+     *   - 如果 User 有 @OneToMany 关联（当前没有），使用 findAll() 再遍历关联，
+     *     会触发 N 条额外 SQL（即 N+1 问题）
+     *   - 当前设计：本实体无关联关系（单表实体）+ DTO 只暴露需要的字段，
+     *     天然规避 N+1；增加关联时记得 @Fetch(JOIN) 或 EntityGraph 优化
+     *
+     * 六、乐观锁与并发更新机制
+     *   1) 脏检查的并发边界：两个事务同时更新同字段会丢失更新（lost update）
+     *   2) @Version 乐观锁实现原理：加载时快照记录 version，更新时执行
+     *      UPDATE USER SET version=version+1 WHERE id=? AND version=?，
+     *      命中行数为 0 时抛 ObjectOptimisticLockingFailureException
+     *   3) 悲观锁 SELECT ... FOR UPDATE 适合热点行，但持锁久有死锁风险
+     *   4) 跨实例的分布式锁（Redisson）弥补乐观锁无法覆盖的场景，
+     *      注意锁粒度与超时租约，避免锁泄漏卡死系统
+     *   5) 项目决策点：当前 User 写入低频，最小可行解是不加锁；
+     *      未来出现同时改邮箱等需求时，引入 @Version 成本最低
+     *
+     * 七、JPA 缓存层级与 Spring Cache 的关系
+     *   1) 一级缓存：PersistenceContext，事务级，默认开启
+     *   2) 二级缓存：SessionFactory 级，跨事务共享，需显式开启
+     *      并标注 @org.hibernate.annotations.Cache(usage = READ_WRITE)
+     *   3) Spring Cache（本项目的 users 缓存）：应用级缓存，
+     *      在 Service 层生效，对 Repository 层透明，两层可叠加
+     *   4) 叠加原则：一级缓存防重复 SQL、Spring Cache 防重复业务方法、
+     *      二级缓存只在高并发读且实体更新少的场景启用
      * =========================================================================
      */
 }

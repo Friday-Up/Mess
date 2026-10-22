@@ -91,56 +91,75 @@ public interface UserRepository extends JpaRepository<User, Long> {
 
 /*
  * =========================================================================
- * 【DDD 仓储模式】Repository 与 DAO 的区别（非可执行代码）
+ * 【Spring 内幕】接口如何被实例化：JDK 动态代理与 JPA Repository 工厂（非可执行代码）
  * =========================================================================
  *
- * 一、Repository vs DAO
- *   DAO（Data Access Object）：
- *   - 面向数据表：UserDao.selectByEmail() 直接映射 SQL
- *   - 方法名：技术导向（select/insert/update/delete）
- *   - 返回：数据行/DTO，无业务语义
- *   - 一个表一个 DAO
- *   Repository（DDD 仓储）：
- *   - 面向聚合根：UserRepository 管理 User 聚合整体
- *   - 方法名：业务导向（findByUsername/existsByEmail）
- *   - 返回：聚合根实体（含关联对象），有业务语义
- *   - 一个聚合根一个 Repository
- *   - 隐藏持久化细节：调用方不知道底层是 JPA/MyBatis/内存
- *   本项目 UserRepository 已符合 Repository 模式：
- *   - 方法名业务导向（findByUsername/existsByEmail）
- *   - 管理 User 聚合（当前聚合只有 User 本身）
+ * 一、一个只有方法签名、没有任何实现类的接口，为什么能被 @Autowired 注入？
+ *   本接口 extends JpaRepository，启动时 Spring 容器会为它凭空创建 Bean：
+ *   1) @EnableJpaRepositories（JpaRepositoriesAutoConfiguration 引入）
+ *      -> @Import(JpaRepositoriesRegistrar)
+ *   2) JpaRepositoriesRegistrar 扫描包下所有 Repository 接口，
+ *      为每个接口注册一个 BeanDefinition：JpaRepositoryFactoryBean
+ *   3) 实例化时机：JpaRepositoryFactoryBean 是 FactoryBean -> getBean 时
+ *      调用 getObject()，内部委托给 RepositoryFactorySupport
+ *   4) RepositoryFactorySupport.getRepository(...)：
+ *      a. 创建 JdkDynamicProxyFactory
+ *      b. 构造默认实现 SimpleJpaRepository 的实例（带 EntityManager）
+ *      c. 生成实现 InvocationHandler 的代理对象，
+ *         包装 RepositoryProxyPostProcessor + QueryExecutorMethodInterceptor
+ *   5) Proxy.newProxyInstance(classLoader, new Class[]{UserRepository, ...},
+ *      handler) -> 生成对象类型形如 com.sun.proxy.$Proxy23
+ *   所以 beanName=userRepository 指向的其实是 JDK Proxy，它的每个方法调用
+ *   都被拦截 -> QueryExecutorMethodInterceptor 决定走派生查询还是默认实现
  *
- * 二、Repository 的设计规范
- *   1) 只为聚合根创建 Repository：
- *      User 是聚合根 -> 有 UserRepository
- *      UserAddress 是聚合内对象 -> 无 UserAddressRepository，
- *      通过 UserRepository 一起加载/保存
- *   2) 方法语义化：
- *      findByUsername（业务语义）而非 selectByUsernameAndStatus（技术语义）
- *   3) 返回聚合根或聚合根集合：
- *      List<User> 而非 List<UserDTO>（查询模型走 CQRS 另建查询服务）
- *   4) 保存聚合整体：
- *      save(user) 保存 User 及其关联的 UserAddress（级联）
- *      而非分别 save(user) + saveAddress(address)
+ * 二、派生查询方法的解析与转换：findByUsername 是怎么变成 SQL 的
+ *   1) PartTree 解析：findByUsername -> findBy 为谓词前缀，Username 为属性名
+ *   2) JpaQueryCreator 遍历 PartTree，为 Username 生成 Equal 条件
+ *   3) CriteriaBuilder 构造 JPQL 语义：select user from User user
+ *      where user.username = :username
+ *   4) Hibernate 将 JPQL 转换为 SQL，参数用 PreparedStatement 绑定
+ *      （防注入由此保证）
+ *   5) 解析结果缓存：AbstractJpaQuery 在第一次调用时 build，之后复用
+ *   existsByUsername 走 exists() 投影（select 1），而不是加载实体，
+ *   这就是本接口注释中比 findByUsername 性能更优的框架层实现
  *
- * 三、CQRS 下的读写分离
- *   写模型（Command）：UserRepository（JPA），走聚合根，保证业务规则
- *   读模型（Query）：UserQueryService，不走聚合根，直接查 DTO/视图
- *   读模型实现选择：
- *   1) JPA 投影：interface UserView { String getUsername(); } + findBy(...)
- *   2) 原生 SQL DTO 投影：@Query("SELECT new com.example.UserDto(...) FROM User")
- *   3) MyBatis：复杂查询走 MyBatis，简单 CRUD 走 JPA
- *   4) Elasticsearch：全文搜索场景，数据同步到 ES
- *   5) 物化视图/只读从库：读多写少场景，读走从库
- *   好处：读模型可以随意优化（加字段/换存储），不影响写模型的业务规则
+ * 三、BeanDefinition 的作用：把描述与实例分离
+ *   - 代理类的 BeanDefinition 记录 factoryBeanName 与真实接口类型，
+ *     实例化时再解析 -> 容器启动时所有 Repository 接口都注册为 Definition
+ *     （轻量），真正的代理对象只在被注入或调用时才创建
  *
- * 四、微服务拆分后的数据访问
- *   单体：直接注入 UserRepository 访问用户数据
- *   微服务：订单服务不能直接访问用户库（数据库隔离）
- *   替代方案：
- *   1) API 调用：订单服务调用户服务的 /api/users/{id}
- *   2) 数据冗余：订单存储下单时的用户快照（昵称/手机号），不实时查询
- *   3) 事件同步：用户服务发布 UserUpdated 事件，订单服务更新本地缓存
- *   4) CQRS 跨服务：订单服务订阅用户服务的事件，维护本地用户读模型
+ * 四、为什么 Repository 接口默认不需要加 @Repository 注解
+ *   - @Repository 的主要作用是声明符号（供扫描）与异常转换
+ *     （PersistenceExceptionTranslationPostProcessor 转换原生 ORM 异常）
+ *   - Spring Data 系列：扫描行为由 @EnableJpaRepositories 自带，
+ *     异常转换则通过 EntityManager + PersistenceExceptionTranslator
+ *     在代理内部完成 -> 接口不加注解依然能被扫描并具备异常翻译能力
+ *
+ * 五、分页接口的内幕（SimpleJpaRepository.findAll(Pageable)）
+ *   1) 框架默认实现 SimpleJpaRepository 的方法带 @Transactional(readOnly=true)
+ *   2) findAll(Pageable) 执行过程：QueryUtils 生成带 OrderHint 的 JPQL，
+ *      TypedQuery.setFirstResult(offset).setMaxResults(size)，
+ *      底层 Hibernate 翻译为 select * from USER limit ? offset ?
+ *   3) Page vs Slice：Page 会额外执行 count 查询，Slice 不查 count；
+ *      深分页（offset > 10000）时 count(*) 与 limit offset 都会退化，
+ *      高吞吐列表接口建议改用 Slice + 唯一键游标分页
+ *   4) 本接口在 UserService 层被 @Cacheable(key=allUsers-页码-页大小) 包裹，
+ *      注意 sort 参数变化会生成不同 key，缓存击穿面需评估
+ *   5) @EntityGraph 与 @Query(fetch=JOIN) 是关联查询 N+1 的两种框架级解药
+ *
+ * 六、查询进阶：@Query / 命名查询 / 投影接口
+ *   1) @Query("select u from User u where u.email like %:kw%")：
+ *      自定义 JPQL，适合派生命名过长或较复杂的条件
+ *      注意：从 JPA 实体名（User）而非表名（USER）书写
+ *   2) @Query(nativeQuery=true, value="select * from USER where ...")：
+ *      原生 SQL，绕开 JPQL 表达力限制，但失去跨方言可移植性
+ *   3) 投影接口（Projection）：interface UserNameView { String getUsername(); }
+ *      findBy(...) 返回 UserNameView，只 select 需要的列，
+ *      适合轻量列表场景，避免加载整个实体
+ *   4) Specifications（JpaSpecificationExecutor）：
+ *      动态条件拼接（多条件搜索），本接口可 extends
+ *      JpaSpecificationExecutor<User> 获得能力
+ *   5) 查询缓存：Hibernate 二级缓存 + @org.hibernate.annotations.Cache，
+ *      只对主键/findById 生效复杂查询不命中，慎用以免一致性问题
  * =========================================================================
  */

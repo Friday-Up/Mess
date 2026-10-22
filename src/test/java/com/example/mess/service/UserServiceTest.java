@@ -194,76 +194,61 @@ class UserServiceTest {
 
     /*
      * =========================================================================
-     * 【DDD 测试策略】领域层测试金字塔（非可执行代码）
+     * 【Spring 内幕】Mockito 扩展点与 Spring 集成的测试内幕（非可执行代码）
      * =========================================================================
      *
-     * 一、DDD 各层的测试策略
-     *   领域层（实体/值对象/领域服务）：
-     *   - 纯业务逻辑，无框架依赖
-     *   - 测试：纯单元测试，无 Mock，无 Spring，毫秒级
-     *   - 示例：测试 User.changeEmail() 的业务规则
-     *     @Test void changeEmail_validEmail_updatesEmail() {
-     *       User user = new User("alice", "old@x.com");
-     *       user.changeEmail("new@x.com");
-     *       assertEquals("new@x.com", user.getEmail());
-     *     }
-     *   - 覆盖率要求：最高（>90%），业务规则不能有漏洞
+     * 一、本测试类为什么不需要启动 Spring 容器
+     *   1) 本类用 @ExtendWith(MockitoExtension.class)（JUnit 5 扩展）
+     *      非 SpringExtension -> 无 ApplicationContext，每个测试毫秒级
+     *   2) @Mock UserRepository -> Mockito 生成代理（拦截全部方法）
+     *   3) @InjectMocks UserService -> 按构造器/字段/setter 顺序注入 mock，
+     *      直接得到一个只依赖 mock 的真实 Service 对象
+     *   4) 局限：缓存/事务/AOP 全部失效（因为没走 Spring 代理）
+     *      -> 本类方法上的 @Cacheable 不会触发，直接进入方法体
+     *      -> 这也是为什么本测试特别需要验证缓存未命中时的业务逻辑
      *
-     *   应用层（应用服务/用例编排）：
-     *   - 编排逻辑，依赖领域层和仓储
-     *   - 测试：单元测试 + Mock 仓储，验证编排流程
-     *   - 本类 UserServiceTest 就是应用层测试
-     *   - 验证点：调了正确的仓储方法、事务边界正确、事件发布正确
+     * 二、Mockito 的核心 API 在做什么
+     *   - when(userRepository.findById(1L)).thenReturn(Optional.of(user))：
+     *     注册匹配条件（存入 SourceLocator），下次方法调用拦截到匹配条件
+     *     就返回预置值，跳过真实实现
+     *   - ArgumentMatchers.any()/eq(...)：放宽或精确匹配参数
+     *   - verify(userRepository, times(1)).findById(1L)：记录并断言调用次数
+     *   - thenThrow：模拟异常分支（验证异常映射 404 的逻辑）
      *
-     *   基础设施层（仓储实现/外部服务）：
-     *   - 技术实现，依赖 JPA/HTTP/MQ
-     *   - 测试：集成测试，@DataJpaTest + 真实数据库（Testcontainers）
-     *   - 验证点：SQL 正确、映射正确、事务正确
+     * 三、与 Spring 环境的对比：什么时候该切回集成测试
+     *   - 纯逻辑测试（如本类）：MockitoExtension 足够，快、稳、无 IO
+     *   - 集成测试（缓存生效、事务行为）：需要 @SpringBootTest/@DataJpaTest
+     *     并验证框架层行为（如缓存的 key 策略实际是怎样的）
+     *   - 混合策略：缓存 key 生效性单独用 @SpringBootTest 写 1-2 个集成用例，
+     *     剩余逻辑用纯 Mockito 快速覆盖
      *
-     *   门面层（Controller/Listener）：
-     *   - 协议适配，依赖应用层
-     *   - 测试：切片测试 @WebMvcTest + @MockBean 应用服务
-     *   - 验证点：路由正确、参数绑定正确、序列化正确、状态码正确
+     * 四、测试可维护性要点
+     *   - given/when/then 结构：本类用注释分区，降低阅读成本
+     *   - 不写无意义断言（assertThat(x).isNotNull() 只证明方法没炸）
+     *   - verify 慎用：过度 verify 会把测试绑死实现细节，重构前得改大量测试
+     *   - IDE 快捷生成 mock，但别盲目依赖 -- 测试质量取决于断言设计
      *
-     * 二、测试替身（Test Double）分类
-     *   1) Mock：验证交互（调了什么方法、传了什么参数）
-     *      Mockito.when/verify 就是 Mock
-     *      适用：验证编排逻辑（应用服务调了仓储）
-     *   2) Stub：提供预设返回值（不验证交互）
-     *      Mockito.when(repo.findById(1L)).thenReturn(user) 就是 Stub
-     *      适用：为被测对象提供依赖数据
-     *   3) Spy：部分真实 + 部分打桩
-     *      @Spy 真实对象 + 覆盖部分方法
-     *      适用：测试真实逻辑但拦截副作用（如发邮件）
-     *   4) Fake：简化实现（如内存 UserRepository）
-     *      InMemoryUserRepository implements UserRepository
-     *      适用：领域层测试，不依赖 Mockito，更接近真实行为
-     *   5) Dummy：只占位，不使用
-     *      传 null 或空对象只为满足签名
+     * 五、AssertJ 常用断言速查
+     *   1) assertThatThrownBy(() -> service.getUserById(99L))
+     *      .isInstanceOf(ResourceNotFoundException.class)
+     *      .hasMessageContaining(用户不存在)
+     *   2) assertThat(page.getContent()).extracting(UserDto::getUsername)
+     *      .containsExactly(alice, bob)
+     *   3) assertThat(dto).usingRecursiveComparison()
+     *      .ignoringFields(createdAt).isEqualTo(expected)——DTO 整体比对利器
+     *   4) verify 配合 ArgumentCaptor：捕获下层传入参数并断言其内容，
+     *      而非只断言调用次数
+     *   5) 测试间隔离：不依赖执行顺序，每个用例独立构造 given 数据
+     *   6) @Nested 分组 given/when/then 分支，JUnit 5 原生支持，可读性更好
      *
-     * 三、Given-When-Then（BDD 风格）
-     *   与 Arrange-Act-Assert 本质相同，但用业务语言描述：
-     *   Given（假设）：一个已存在的用户，username 为 alice
-     *   When（当）：调用 findByUsername("alice")
-     *   Then（那么）：返回该用户，且 id 为 1
-     *   代码映射：
-     *   given(userRepository.findByUsername("alice")).willReturn(user);  // Given
-     *   User result = userService.findByUsername("alice");               // When
-     *   assertEquals(1L, result.getId());                                // Then
-     *   BDDMockito：given().willReturn() 替代 when().thenReturn()，语义更贴合 BDD
-     *
-     * 四、测试数据构建模式
-     *   1) Test Data Builder：
-     *      UserBuilder.anUser().withUsername("alice").withEmail("a@x.com").build()
-     *      优点：可读、可复用、默认值合理、按需覆盖
-     *   2) Object Mother：
-     *      UserFactory.alice() / UserFactory.bob()
-     *      优点：预定义角色化测试数据，语义清晰
-     *      缺点：角色膨胀后难维护
-     *   3) EasyRandom/Instancio：自动生成随机测试数据
-     *      优点：零模板代码
-     *      缺点：数据不可预测，断言困难，适合填充不关心字段
-     *   建议：核心实体用 Builder，辅助数据用随机生成
+     * 六、Mockito 时序与状态验证的选择
+     *   1) verify 只验证交互（被调用与否），不验证状态正确性
+     *   2) 断言返回值才是主断言，verify 只做辅助边界检查
+     *   3) InOrder 验证调用次序：inOrder(repo).verify(findAll).verify(save)
+     *      谨慎使用，次序通常属于实现细节而非契约
+     *   4) mock 静态方法需 mockito-inline（MockedStatic），
+     *      静态工具类调用是测试泥潭，能重构为注入实例就重构
+     *   5) 本类验证思路：先断言业务结果（DTO 内容），再抽查唯一性检查次数
      * =========================================================================
      */
 }

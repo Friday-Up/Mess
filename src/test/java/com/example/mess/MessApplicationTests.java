@@ -56,59 +56,60 @@ class MessApplicationTests {
 
     /*
      * =========================================================================
-     * 【微服务测试】契约测试与消费者驱动契约（CDC）（非可执行代码）
+     * 【Spring 内幕】Spring TestContext 框架与 @SpringBootTest 启动机理（非可执行代码）
      * =========================================================================
      *
-     * 一、微服务测试的挑战
-     *   单体：集成测试覆盖全链路（同进程）
-     *   微服务：服务独立部署/独立测试，跨服务集成测试困难
-     *   问题：服务 A 依赖服务 B 的 API，B 改了 API，A 不知道，上线后故障
+     * 一、@SpringBootTest 的查根与加载流程
+     *   1) 测试类执行前，JUnit 5 的 SpringExtension（spring-test 提供）
+     *      先执行 beforeAll -> TestContextManager 构建 TestContext
+     *   2) 查找应用入口：@SpringBootTest 内部有 @SpringBootConfiguration，
+     *      搜索算法（SmartContextLoader）从测试类所在包向上逐级扫描
+     *      -> 找到 com.example.mess.MessApplication 上的 @SpringBootApplication
+     *      （找到标记后不再继续向上，否则可能错误加载到别的应用）
+     *   3) 构造 SpringApplication -> 和生产一致地 run()，
+     *      只是 context 类型换成 MockServletEnvironment 或 Servlet Web App
+     *   4) 本测试类的 contextLoads()：只有 assertThat(context).isNotNull()
+     *      -> 验证容器能起来本身就有价值：自动装配冲突、Bean 循环依赖、
+     *      属性拼写错误这些问题会在此时被一次性发现
      *
-     * 二、消费者驱动契约测试（Consumer-Driven Contract Testing）
-     *   核心思想：消费者（A）定义契约，提供者（B）遵守契约
-     *   流程：
-     *   1) 消费者 A 编写契约：定义期望 B 的响应格式
-     *      Pact DSL：uponReceiving("get user by id")
-     *                .path("/api/users/1")
-     *                .willRespondWith(200, body:{id:1, username:"alice"})
-     *   2) 消费者 A 运行契约测试：用 Mock Provider 验证 A 的逻辑
-     *   3) 契约发布：A 的契约发布到 Pact Broker
-     *   4) 提供者 B 验证契约：B 拉取 A 的契约，用真实服务验证是否满足
-     *   5) CI 阻断：B 的改动若违反 A 的契约，CI 失败，阻止合并
-     *   工具：Pact（多语言）/ Spring Cloud Contract（Spring 生态）
+     * 二、ContextCache：测试性能的命脉
+     *   - 多个测试类同用一套配置（同入口类、同 profile、同属性）时，
+     *     Spring TestContext 只启动一次 ApplicationContext，后续复用
+     *   - contextKey = 配置哈希。一旦有差异（如 @ActiveProfiles(test)），
+     *     就另起一个上下文 -> 测试越多启动越慢（每个上下文几秒起）
+     *   - 本类和 controller/service 测试如果用了不同的 @ActiveProfiles，
+     *     会各起一个容器（观察启动日志能看到 Found N contexts 警告）
+     *   - 优化方向：尽量统一 profile；用 TestConfiguration 减少差异
      *
-     * 三、Spring Cloud Contract
-     *   提供者（B）编写契约（Groovy DSL）：
-     *   Contract.make {
-     *     request { method 'GET'; url '/api/users/1' }
-     *     response { status 200; body([id: 1, username: 'alice']) }
-     *   }
-     *   提供者 CI：自动生成验证测试，确保真实 API 满足契约
-     *   消费者（A）：提供者发布 stub jar，A 用 stub 做集成测试
-     *   A 的测试：@AutoConfigureStubRunner(ids="com.example:user-service:+:stubs")
+     * 三、@Transactional 测试的自动回滚机制
+     *   - 测试方法上加 @Transactional，事务在测试结束后自动 ROLLBACK
+     *     （Spring Test 抽象处理），数据库不留脏数据
+     *   - 配合 @Commit / @Rollback(false) 可显式提交
+     *   - 关键点：只对测试类内部调用线程生效；
+     *     如果测试中另起线程或异步方法访问数据库，回滚边界不可控
      *
-     * 四、测试策略对比
-     *   1) 单元测试：Mock 依赖，验证单个类/方法的逻辑（快）
-     *   2) 切片测试：@WebMvcTest/@DataJpaTest，验证单层（较快）
-     *   3) 集成测试：@SpringBootTest，验证模块内全链路（慢）
-     *   4) 契约测试：验证服务间接口契约（中速，CI 必备）
-     *   5) 端到端测试：真实部署全链路验证（最慢，少量关键场景）
-     *   6) 混沌工程：故意注入故障（网络延迟/服务宕机），验证系统韧性
-     *      工具：Chaos Monkey for Spring Boot / Chaos Mesh
-     *   策略：单元测试最多（70%），集成测试次之（20%），E2E 最少（10%）
+     * 四、测试里常见但容易踩的坑
+     *   1) @Disabled 忘记删除，测试静默跳过
+     *   2) 用 @Autowired 真实 Controller -> 容器加载慢且隐含集成
+     *      建议分层：控制器用 MockMvc（见控制层测试），单元测试不启容器
+     *   3) 静态字段在容器间泄漏：上下文重建后静态变量不会清零
      *
-     * 五、Testcontainers（真实依赖集成测试）
-     *   问题：H2 内存库与 MySQL 行为不一致（函数/DDL/隔离级别差异）
-     *   方案：Testcontainers 启动真实 Docker 容器做测试
-     *   @Testcontainers
-     *   @Container
-     *   static MySQLContainer<?> mysql = new MySQLContainer<>("mysql:8.0");
-     *   @DynamicPropertySource
-     *   static void props(DynamicPropertyRegistry r) {
-     *     r.add("spring.datasource.url", mysql::getJdbcUrl);
-     *   }
-     *   好处：测试环境与生产一致（真实 MySQL/Redis/Kafka），减少"本地通过生产挂"
-     *   成本：需要 Docker 环境，CI 需支持 Docker-in-Docker
+     * 五、Spring Boot 测试工具箱速查
+     *   1) @TestConfiguration：仅对当前测试类生效的专用配置，不污染主上下文
+     *   2) TestPropertyValues.of(key=value).applyTo(context)：
+     *      运行时动态注入属性，无需复制 application.yml
+     *   3) OutputCaptureExtension：捕获 System.out/stderr，断言日志行为
+     *   4) TestRestTemplate：RANDOM_PORT 模式下真发 HTTP，可验证序列化端到端
+     *   5) @DataJpaTest：只切 JPA 层（Repository + 内嵌库），事务自动回滚
+     *   6) @Testcontainers：用真实 MySQL 容器替换 H2，规避方言差异带来的
+     *      测试通过但生产报错问题，建议 CI 中至少跑一遍
+     *
+     * 六、CI 流水线的测试分层实践建议
+     *   1) 快层（<30s）：纯 Mockito 单元测试，每个 PR 都跑
+     *   2) 中层（<3min）：@WebMvcTest + @DataJpaTest 切片测试
+     *   3) 慢层（合入门禁）：@SpringBootTest 全量 + Testcontainers 真库
+     *   4) ContextCache 在 CI 上可能失效（每 Job 全新容器），
+     *      计划执行时间时按最坏情况估算，别只看本地缓存命中后的速度
      * =========================================================================
      */
 }

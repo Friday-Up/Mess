@@ -220,69 +220,61 @@ class UserControllerTest {
 
     /*
      * =========================================================================
-     * 【API 测试】REST API 测试规范与文档化（非可执行代码）
+     * 【Spring 内幕】@WebMvcTest 切片测试与 Spring Security Mock 上下文（非可执行代码）
      * =========================================================================
      *
-     * 一、API 测试的三个层次
-     *   1) 语法层：请求格式正确
-     *      - HTTP 方法正确（GET/POST/PUT/DELETE）
-     *      - Content-Type 正确（application/json）
-     *      - 请求体 JSON 格式合法
-     *   2) 语义层：业务含义正确
-     *      - 参数校验通过（@Valid）
-     *      - 资源存在性检查
-     *      - 权限检查
-     *      - 业务规则满足
-     *   3) 契约层：接口约定稳定
-     *      - 响应结构一致（ApiResponse 格式）
-     *      - 字段名/类型稳定
-     *      - 状态码语义正确
-     *      - 版本兼容（新增字段不破坏旧客户端）
+     * 一、@WebMvcTest 是怎么裁剪 ApplicationContext 的
+     *   1) @WebMvcTest(UserController.class) 触发 TypeExcludeFilters
+     *   2) 加载的 Bean 只包含：
+     *      - @Controller + @ControllerAdvice + @JsonComponent + Filter/WebMvcConfigurer
+     *      - 不包括 @Service/@Repository/@Component
+     *   3) 所以控制器依赖的 UserService 必须显式提供 -> @MockBean
+     *      （否则 NoSuchBeanDefinitionException：依赖注入失败）
+     *   4) 好处：上下文更小、启动更快，且强制单层测试聚焦
+     *   5) 代价：覆盖面有限，跨层缺陷（如 SQL 错误）不会暴露
      *
-     * 二、API 测试用例设计矩阵
-     *   每个接口按以下维度设计用例：
-     *   维度1 - 正常路径：
-     *     [ ] 合法参数 -> 200/201 + 正确 data
-     *   维度2 - 边界值：
-     *     [ ] 最小值/最大值/空值/超长值
-     *   维度3 - 异常路径：
-     *     [ ] 资源不存在 -> 404
-     *     [ ] 参数校验失败 -> 400
-     *     [ ] 未认证 -> 401
-     *     [ ] 无权限 -> 403
-     *     [ ] 唯一约束冲突 -> 409
-     *     [ ] 服务端异常 -> 500（不泄露堆栈）
-     *   维度4 - 幂等性：
-     *     [ ] 重复调用结果一致（GET/PUT/DELETE 天然幂等）
-     *     [ ] POST 重复提交 -> 幂等键去重或返回 409
-     *   维度5 - 并发：
-     *     [ ] 并发创建相同数据 -> 唯一约束兜底
-     *     [ ] 并发更新同一资源 -> 乐观锁/悲观锁
+     * 二、@MockBean 的实现原理
+     *   1) @MockBean 是 spring-test 提供，在上下文准备阶段插入
+     *      MockitoFactoryBean 生成 Mockito 代理（CGLIB + 拦截器）
+     *   2) 用户用 when(...).thenReturn(...) 控制返回值
+     *   3) 注意：@MockBean 会改变 contextKey -> 会新建一个上下文，
+     *     与其他不使用 @MockBean 的测试共用缓存变差
+     *   4) @SpyBean：包装真实 Bean，默认走真实方法，可选择性打桩
+     *      （适合需要部分真实逻辑 + 部分隔离的场景）
      *
-     * 三、API 文档即测试（Documentation as Test）
-     *   springdoc-openapi + Swagger UI：
-     *   1) 注解定义文档：@Operation(summary="查询用户") @ApiResponse(responseCode="200")
-     *   2) 自动生成 OpenAPI 规范（/v3/api-docs）
-     *   3) Swagger UI 交互式文档（/swagger-ui.html）
-     *   4) 契约验证：用 OpenAPI 规范验证响应是否符合文档
-     *      工具：spring-cloud-contract / swagger-request-validator
-     *   5) Mock 服务：前端用 OpenAPI 规范生成 Mock Server，前后端并行开发
-     *      工具：Prism / WireMock
+     * 三、@WithMockUser 与 SecurityContext 的模拟
+     *   1) 未认证访问 /api/users/1 -> 401/重定向登录（本测试中通过 Security Filter 拦截）
+     *   2) @WithMockUser(username=admin, roles=ADMIN)
+     *      -> WithMockUserSecurityContextFactory 构造 SecurityContext
+     *      -> SecurityContextHolder.setContext(...) 设置当前线程
+     *      -> SecurityFilter 链识别已认证用户 -> 放行
+     *   3) @WithMockUser 是登录态的最简模拟，不需要走表单登录流程
+     *   4) 更复杂场景可用 @WithUserDetails + UserDetailsService 真实带角色加载
      *
-     * 四、E2E 测试工具链
-     *   1) REST Assured：Java API 测试框架，BDD 风格
-     *      given().param("page","0").when().get("/api/users")
-     *        .then().statusCode(200).body("data.size()",is(10));
-     *   2) Karate DSL：API 测试 + 性能测试 + Mock，BDD 语法
-     *      Given path '/api/users', 1
-     *      When method get
-     *      Then status 200
-     *      And match response == { id: 1, username: 'alice' }
-     *   3) Postman/Newman：API 手动测试 + CI 自动化（newman run collection.json）
-     *   4) k6：性能测试 + API 测试，JavaScript 脚本
-     *      http.get('http://localhost:8080/api/users');
-     *   5) Playwright/Cypress：前端 E2E，覆盖 API + UI 全链路
-     *   本项目当前用 MockMvc（单进程内），微服务后可引入 REST Assured/Karate
+     * 四、Security 测试的注意事项
+     *   - 跨上下文持有：@WithMockUser 默认在主线程有效，
+     *     如测试里发异步子线程请求需要手动传递 SecurityContext
+     *   - 过滤器链验证：本测试通过 SecurityRequestPostProcessors 可以用
+     *     user(admin).password(admin) 直接模拟表单登录后流程
+     *   - 授权测试的粒度：role/admin/perm 三层粒度选择应与实际权限模型一致
+     *
+     * 五、请求构造器体系与常见参数类型测试
+     *   1) RequestBuilder 家族：get/post/put/delete + .param/.header/.content/.accept
+     *   2) JSON 场景必须 .contentType(MediaType.APPLICATION_JSON)，缺失会返回 415
+     *   3) 多值参数：.params(MultiValueMap) 模拟复选框/批量 ID
+     *   4) 文件上传：multipart(file).file(new MockMultipartFile(...))
+     *   5) PathVariable：get(/api/users/1) 直接拼 URL，框架自动匹配注册映射
+     *   6) 分页参数：.param(page,0).param(size,20)，
+     *      Spring Data 的 PageableHandlerMethodArgumentResolver 自动解析
+     *   7) 断言次序：先 status -> header -> jsonPath，由粗到细
+     *
+     * 六、分页与排序参数的端到端测试要点
+     *   1) .param(page, 0).param(size, 10) 覆盖默认分页分支
+     *   2) .param(sort, username,desc) 验证排序参数被 Pageable 正确解析
+     *   3) 越界页码：Spring Data 默认返回空页而非异常，
+     *      断言 getContent() 为空且 totalPages 正常即可
+     *   4) 分页响应体字段约定：content/number/size/totalElements，
+     *      MockMvc + jsonPath 可逐字段断言，守住分页契约
      * =========================================================================
      */
 }

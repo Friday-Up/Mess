@@ -143,56 +143,76 @@ public class SecurityConfig {
 
     /*
      * =========================================================================
-     * 【分布式安全】微服务认证授权架构（非可执行代码）
+     * 【Spring 内幕】@Configuration 的 CGLIB 增强与 BeanDefinition 注册机制（非可执行代码）
      * =========================================================================
      *
-     * 一、微服务认证架构演进
-     *   单体：Session 存在应用内存，Cookie 关联 Session
-     *   集群：Session 共享（Spring Session + Redis）
-     *   微服务：无状态 Token（JWT），每个服务独立验证
+     * 一、Full 模式 vs Lite 模式：@Configuration 与 @Component 的关键差异
+     *   本类的 @Configuration 让 ConfigurationClassPostProcessor 走 Full 模式：
+     *   - Full 模式：配置类会被 CGLIB 生成子类（Enhancer），任何 @Bean 方法
+     *     调用同类中其他 @Bean 方法都会被拦截并走 BeanFactory.getBean()，
+     *     确保返回的是同一个单例 bean
+     *   - Lite 模式（proxyBeanMethods = false 或 @Component）：类不被代理，
+     *     @Bean 方法间的直接调用等价于普通 Java 方法调用，每次都 new 新对象
+     *   演示差异：假设本类有两个 @Bean 方法
+     *     @Bean A a() { return new A(b()); }
+     *     @Bean B b() { return new B(); }
+     *   Full 模式下 a() 中的 b() 被拦截 -> 返回容器中已有的 B 单例；
+     *   Lite 模式下 a() 中的 b() 是原生调用 -> new 出第二个 B
+     *   Spring Boot 2.2+ 的自动配置类大量使用 Lite 模式以避免 CGLIB 开销
+     *   （配置类里方法互不调用时 proxyBeanMethods=false 是最佳实践）
      *
-     * 二、JWT 在微服务中的流转
-     *   1) 登录：用户 -> 网关 -> 认证服务 -> 验证凭证 -> 签发 JWT
-     *   2) 携带：前端将 JWT 存 localStorage，每次请求放 Authorization: Bearer <jwt>
-     *   3) 网关验证：网关统一验证 JWT 签名/过期，无效直接 401
-     *   4) 传递：网关将用户信息放 Header（X-User-Id/X-User-Roles）转发给后端
-     *   5) 后端信任：后端从 Header 读用户信息，不再验 JWT（信任网关）
-     *      注意：后端需确保请求来自网关（内网隔离/mTLS/网关 IP 白名单）
-     *   6) 服务间调用：服务 A 调服务 B 时，透传原始 JWT 或用服务 Token
+     * 二、@Configuration 类如何被解析为 BeanDefinition
+     *   1) ConfigurationClassPostProcessor（BeanFactoryPostProcessor）在
+     *      refresh() 第 5 步被触发，扫描所有 @Configuration 类
+     *   2) ConfigurationClassParser 解析本类：
+     *      - 类级注解 @EnableWebSecurity 上有 @Import（引入安全核心配置类）
+     *      - @Bean 注解的方法 securityFilterChain / userDetailsService 各生成
+     *        一个 ConfigurationClassBeanDefinition，beanClass 指向工厂方法
+     *        所在类，factoryMethodName 记录方法名
+     *   3) BeanDefinition 元数据：scope=singleton、lazyInit=false、
+     *      primary=false、依赖关系（@DependsOn）等
+     *   4) @Bean 方法间的依赖顺序由方法参数决定：
+     *      securityFilterChain(HttpSecurity http) 需要注入 HttpSecurity bean，
+     *      Spring 推断 BeanDefinition 依赖：先创建 HttpSecurity -> 再构建本方法
      *
-     * 三、OAuth2 / OIDC（开放授权 / 开放身份连接）
-     *   场景：第三方登录（微信/GitHub/Google）、SSO（单点登录）
-     *   角色：
-     *   - 资源所有者：用户
-     *   - 客户端：第三方应用
-     *   - 授权服务器：签发 Token（Keycloak/Auth0/自建）
-     *   - 资源服务器：业务服务（验证 Token）
-     *   流程（授权码模式）：
-     *   1) 用户点击"微信登录" -> 跳转微信授权页
-     *   2) 用户授权 -> 微信返回授权码 -> 客户端用授权码换 Token
-     *   3) 客户端带 Token 请求资源服务器 -> 资源服务器验证 Token
-     *   Spring Security OAuth2：
-     *   - @EnableWebSecurity + oauth2ResourceServer().jwt() -> 资源服务器
-     *   - Spring Authorization Server -> 授权服务器
+     * 三、BeanPostProcessor：所有 Bean 实例化后的流水线工位
+     *   本类产生的两个 Bean 都会流经已注册的后置处理器链：
+     *   - AutowiredAnnotationBeanPostProcessor：处理 @Autowired（本类方法
+     *     参数注入即其职责延伸）
+     *   - CommonAnnotationBeanPostProcessor：处理 @PostConstruct / @PreDestroy
+     *   - ApplicationContextAwareProcessor：回调 Aware 接口
+     *   - Servlet 环境：ServletContextAwareProcessor / WebApplicationContextAwareProcessor
+     *   每个后置处理器有 postProcessBeforeInitialization 与
+     *   postProcessAfterInitialization 两个钩子，初始化注解、Aware 回调、
+     *   AOP 代理生成都在这里发生
+     *   生产提示：后置处理器数量是启动性能的最大变量之一，过多会使每个 Bean
+     *   实例化都经过大量判断（Spring Boot 空项目约 12 个后置处理器）
      *
-     * 四、服务间认证（mTLS / Service Token）
-     *   网关到后端：信任网关 Header（内网隔离）
-     *   服务到服务：
-     *   1) mTLS（双向 TLS）：服务 A 和服务 B 互验证书，Istio 自动注入
-     *   2) Service Token：服务 A 用自身凭证（API Key/服务 JWT）调服务 B
-     *   3) 服务账号：K8s ServiceAccount + RBAC
-     *   零信任网络：不信任内网，所有调用都需认证（mTLS + 权限）
+     * 四、生产环境安全配置的演进清单
+     *   1) 弃用 InMemoryUserDetailsManager + withDefaultPasswordEncoder，
+     *      改为 JdbcUserDetailsManager 或自定义 UserDetailsService + BCrypt，
+     *      cost 因子 >=10 保证单次哈希 >100ms，砌慢暴力破解
+     *   2) 会话固定保护默认开启（migrateSession）：登录后换新 sessionId 防劫持
+     *   3) Remember-Me（RememberMeConfigurer）：TokenBasedRememberMeServices
+     *      与 PersistentTokenRepository 任选，后者更安全（落库可吊销）
+     *   4) CORS 必须显式 .cors(...) + CorsConfigurationSource Bean
+     *   5) HTTPS：容器层 TLS 终止或 requiresChannel().anyRequest().requiresSecure()
+     *   6) 审计事件：注入 AuthenticationSuccessListener 即可捕获登录事件，供风控使用
      *
-     * 五、权限模型
-     *   1) RBAC（基于角色）：用户 -> 角色 -> 权限
-     *      如：admin 角色 -> user:delete 权限
-     *      实现：Spring Security hasRole/hasAuthority
-     *   2) ABAC（基于属性）：根据用户/资源/环境属性动态判断
-     *      如：用户是部门 A 的，只能看部门 A 的数据
-     *      实现：自定义 PermissionEvaluator
-     *   3) ACL（访问控制列表）：每个资源配置可访问的用户列表
-     *      如：文档 D1 -> [user1 可读, user2 可写]
-     *   建议：简单场景 RBAC，复杂场景 RBAC + 数据权限（行级过滤）
+     * 五、SecurityFilterChain 多链匹配与 RequestMatcher
+     *   1) 一个 WebSecurityCustomizer / HttpSecurity 可注册多条链，
+     *      FilterChainProxy 按 RequestMatcher 的注册顺序逐一匹配，
+     *      命中第一条链即处理请求（后面的链不再执行）
+     *   2) 多租户示例（本项目演进方向）：
+     *      securityFilterChainApi(HttpSecurity http)：匹配 /api/**，无状态 JWT
+     *      securityFilterChainWeb(HttpSecurity http)：其余请求，表单登录
+     *      -> 二者用 @Order 与 securityMatcher("/api/**") 区分
+     *   3) @Bean 方法返回类型相同（SecurityFilterChain）不会冲突，
+     *      Spring Boot 3.x 已不再需要设置 bean 名称来区分多条链
+     *   4) 匹配规则常用：requestMatchers().hasRole() / hasAuthority()
+     *      / access((auth, ctx) -> ...)（SpEL 或自定义 AuthorizationManager）
+     *   5) 方法级安全：@EnableMethodSecurity + @PreAuthorize("hasRole('ADMIN')")
+     *      在 Service 方法上再拦一层，与 URL 级规则互补
      * =========================================================================
      */
 }

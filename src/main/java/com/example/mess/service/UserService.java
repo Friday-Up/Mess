@@ -217,58 +217,78 @@ public class UserService {
 
     /*
      * =========================================================================
-     * 【DDD 服务分层】领域服务 vs 应用服务（非可执行代码）
+     * 【Spring 内幕】AOP 代理原理、this 调用失效与事务传播行为（非可执行代码）
      * =========================================================================
      *
-     * 一、DDD 的四种服务
-     *   1) 应用服务（Application Service）：
-     *      - 用例编排层：接收请求 -> 调用领域服务/仓储 -> 返回结果
-     *      - 不含业务规则，只做流程编排
-     *      - 事务边界在这里（@Transactional）
-     *      - 本类 UserService 当前是应用服务（编排 Repository 调用）
-     *   2) 领域服务（Domain Service）：
-     *      - 承载不属于任何单一实体的业务规则
-     *      - 如：转账逻辑涉及 AccountA 和 AccountB，不属于单个 Account
-     *      - 实现：TransferDomainService.transfer(from, to, amount)
-     *      - 纯业务逻辑，不依赖框架（无 @Transactional/@Autowired）
-     *   3) 基础设施服务（Infrastructure Service）：
-     *      - 技术实现：发邮件/发短信/文件存储/消息队列
-     *      - 接口在领域层，实现在基础设施层（依赖倒置）
-     *      - 如：EmailSender 接口 + SmtpEmailSender 实现
-     *   4) 门面服务（Facade/Remote Service）：
-     *      - 对外 API 的适配层：REST Controller / gRPC Service / MQ Listener
-     *      - 只做协议转换，委托给应用服务
-     *      - 本项目 UserController 就是门面服务
+     * 一、@Service 的 UserService Bean 其实是一个代理对象
+     *   本类被 @Cacheable/@CacheEvict 修饰 -> Spring 为其生成 AOP 代理：
+     *   - 代理类型选择：有实现接口且未强制 CGLIB -> JDK 动态代理；否则 CGLIB
+     *     本类未实现接口 -> 使用 CGLIB（生成 UserService$$EnhancerBySpringCGLIB 子类）
+     *   - 容器中 beanName=userService 指向代理对象，而非真实目标对象
+     *   - 注入到 UserController 的也是代理对象
+     *   代理调用链（简化）：caller -> proxy.getUserById(id)
+     *   -> CacheInterceptor.invoke() -> 判断 CacheManager 是否命中
+     *   -> 未命中则 proceed() 反射进入目标方法 -> 结果写入缓存后返回
+     *   这就是 @Cacheable 在不改动本类代码的前提下生效的原因
      *
-     * 二、本类的演进方向（从应用服务到 DDD 分层）
-     *   当前：UserService 既是应用服务又含部分领域逻辑
-     *   目标分层：
-     *   controller/UserController.java        -> 门面服务（协议适配）
-     *   service/UserApplicationService.java   -> 应用服务（用例编排+事务）
-     *   domain/UserDomainService.java         -> 领域服务（跨实体业务规则）
-     *   domain/User.java                      -> 聚合根（实体内业务规则）
-     *   repository/UserRepository.java        -> 仓储接口（领域层）
-     *   repository/impl/UserRepositoryImpl.java -> 仓储实现（基础设施层）
-     *   infra/EmailSender.java                -> 基础设施服务接口
-     *   infra/SmtpEmailSender.java            -> 基础设施服务实现
+     * 二、this 调用失效：AOP 最常见的不生效陷阱
+     *   假设在本类新增一个内部方法：
+     *   public void warmup(Long id) { this.getUserById(id); }
+     *   此时 this.getUserById() 直接进入目标对象的方法，绕过了代理对象：
+     *   - 因为 this 是目标对象本身，不是代理对象
+     *   - CacheInterceptor 没有被织入，@Cacheable 不会触发
+     *   解决方案：
+     *   1) 注入自身代理：@Autowired private UserService self; self.getUserById(...)
+     *   2) 从容器获取：applicationContext.getBean(UserService.class)
+     *   3) AopContext.currentProxy() + 启用 exposeProxy=true（编程式）
+     *   4) 结构上避免内部互调（推荐：让 warmup 也放在外层）
+     *   同样的问题存在于 @Transactional / @Async / @Retryable 等所有
+     *   基于 AOP 的注解 -> 只有外部进来的调用才会走代理通知
      *
-     * 三、六边形架构（Hexagonal Architecture / Ports & Adapters）
-     *   核心思想：领域逻辑在中心，通过端口（接口）与外部交互
-     *   结构：
-     *   - 内部（领域核心）：实体/值对象/领域服务/应用服务 + 端口接口
-     *   - 外部（适配器）：
-     *     驱动适配器（左）：REST Controller/MQ Listener/定时任务 -> 调应用服务
-     *     被驱动适配器（右）：JPA Repository/SMTP/MQ Producer -> 实现端口接口
-     *   依赖方向：外部适配器依赖内部端口，内部不依赖外部
-     *   好处：领域逻辑可独立测试（mock 端口），技术栈可替换（换 ORM/换 MQ）
+     * 三、JDK 动态代理 vs CGLIB 代理的对比要点
+     *   - JDK Proxy：基于接口，生成 com.sun.proxy.$ProxyNN 类，调用时
+     *     反射进 InvocationHandler（AopProxy 的拦截链）
+     *   - CGLIB：生成子类，重写非 final 方法，调用 MethodProxy.invokeSuper
+     *   - CGLIB 约束：final 方法无法代理（静默不生效）；
+     *     构造器会被调用一次（代理子类实例化），注意不要在构造器里依赖注入字段
+     *   - Spring 5+：CGLIB 使用 ClassLoader 缓存代理类，避免重复生成字节码
      *
-     * 四、整洁架构（Clean Architecture）对比
-     *   同心圆结构，依赖规则：外层依赖内层，内层不依赖外层
-     *   - 实体层（Entity）：业务实体/值对象
-     *   - 用例层（Use Case）：应用服务
-     *   - 接口适配层（Interface Adapter）：Controller/Gateway/Presenter
-     *   - 框架层（Framework）：Spring/JPA/数据库
-     *   与六边形架构本质相同，都是"领域核心 + 依赖倒置"
+     * 四、事务传播行为：@Transactional 的传播级别
+     *   若本类方法添加 @Transactional，传播行为的关键场景：
+     *   - REQUIRED（默认）：加入现有事务，没有则新建
+     *   - REQUIRES_NEW：总是挂起当前并新建独立事务（外层回滚不影响本事务）
+     *   - NESTED：基于保存点的部分回滚（依赖 JDBC SAVEPOINT）
+     *   - MANDATORY/SUPPORTS/NOT_SUPPORTED/NEVER：语义分别要求或排除事务
+     *   注意：@Transactional 也是 AOP 实现，内部 this 调用同样不生效；
+     *   且默认只对 public 方法代理，受检异常默认不回滚（需 rollbackFor 配置）
+     *
+     * 五、循环依赖与三级缓存：为什么字段注入可能形成环
+     *   1) 循环依赖链：UserService -> UserController -> UserService 相互注入
+     *   2) 单例对象流的三个缓存（singletonObjects / earlySingletonObjects /
+     *      singletonFactories）协作：A 先实例化但未填充属性，提前暴露的
+     *      ObjectFactory 放入三级缓存；B 装配时拿到 A 的早期引用并完成实例化；
+     *      A 继续填充时从已就绪的 B 获得属性，完成闭环
+     *   3) 三级缓存存在的核心动机是 AOP：早期引用若需要代理，Factory 会先
+     *      生成代理对象（SmartInstantiationAwareBeanPostProcessor）
+     *   4) 构造器循环依赖无解 -> 直接异常，只能用 @Lazy 打断
+     *   5) 最佳实践：依赖图保持树状，配置类用 @Bean 显式表达创建顺序
+     *
+     * 六、@EnableCaching 底层与 CacheInterceptor 细节
+     *   1) @EnableCaching 引入 @Import(CachingConfigurationSelector)，
+     *      注册 InfrastructureAdvisorPostProcessor 与 CacheInterceptor
+     *   2) CacheInterceptor extends CacheAspectSupport：
+     *      a. generateKey：SpEL 解析 key 表达式（本类 allUsers-页-尺寸）
+     *      b. lookup: CacheResolver 找到缓存名 users 对应的 Cache 实现
+     *         （SimpleCacheManager 的 ConcurrentMapCache / RedisCache）
+     *      c. miss -> invoke 真实方法 -> put 结果
+     *      d. hit -> 直接返回缓存值（跳过方法体）
+     *   3) 多线程下的缓存一致性：
+     *      - @Cacheable 在并发 miss 时可能多次回源（缓存击穿），
+     *        可用 sync=true 让同一 key 串行回源（底层 putIfAbsent）
+     *      - 写后失效的窗口期：@CacheEvict 与 DB 写入非原子，
+     *        严格一致场景需用 Redis 分布式锁或延迟双删
+     *   4) 序列化注意：切换 Redis 缓存时，Page<UserDto> 需可序列化
+     *      （GenericJackson2JsonRedisSerializer 保留类型信息最省心）
      * =========================================================================
      */
 }

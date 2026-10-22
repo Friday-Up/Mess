@@ -177,64 +177,60 @@ class HelloControllerTest {
 
     /*
      * =========================================================================
-     * 【契约测试】序列化契约与版本兼容性（非可执行代码）
+     * 【Spring 内幕】MockMvc 内幕：MockServletEnvironment 与请求模拟（非可执行代码）
      * =========================================================================
      *
-     * 一、序列化契约的定义
-     *   序列化契约 = API 响应的 JSON 结构约定
-     *   包含：字段名、字段类型、字段是否可选、嵌套结构、格式（日期/枚举）
-     *   示例（ApiResponse<String> 的契约）：
-     *   {
-     *     "code": integer,         // 必填，HTTP 状态码
-     *     "message": string,       // 必填，用户可读信息
-     *     "data": string | null,   // 可选，泛型数据
-     *     "path": string           // 必填，请求路径
-     *   }
-     *   契约一旦发布，就是与所有消费方的约定，不能随意破坏
+     * 一、MockMvc.build() 做了什么
+     *   1) 自动配置模式下，MockMvcAutoConfiguration 组装出 MockMvcBuilder：
+     *      内部构造 TestDispatcherServlet（DispatcherServlet 的测试子类）
+     *   2) 注册 HandlerMapping + HandlerAdapter + ExceptionResolver +
+     *      HttpMessageConverter -> 与生产装配尽量一致
+     *   3) MockMvc 本质是把 HTTP 请求模拟成对象（MockHttpServletRequest），
+     *      跳过 Tomcat 网络/线程层，直接在调用线程里走 DispatcherServlet
+     *      -> 快（毫秒级）且不需要起 Web 服务器
      *
-     * 二、版本兼容性规则
-     *   向后兼容（旧客户端读新响应）：
-     *   [x] 新增字段（旧客户端忽略未知字段）- 安全
-     *   [x] 新增可选字段（值为 null 时旧客户端无感知）- 安全
-     *   [ ] 删除字段 - 破坏兼容
-     *   [ ] 改字段名 - 破坏兼容
-     *   [ ] 改字段类型（integer -> string）- 破坏兼容
-     *   [ ] 改字段语义（code 从 HTTP 状态改为业务码）- 破坏兼容
-     *   向前兼容（新客户端读旧响应）：
-     *   [x] 新客户端对新增字段提供默认值 - 需设计
-     *   [x] 新客户端容忍字段缺失 - 需设计
-     *   建议：新增字段用 @JsonInclude(NON_NULL)，旧响应无此字段，新客户端给默认值
+     * 二、perform() 内部的调用链
+     *   1) MockMvc.perform(get("/hello?name=Spring"))
+     *      -> RequestBuilder 构造 MockHttpServletRequest（含 URI/参数/Header）
+     *   2) MockMvc -> MockFilterChain 串联已注册 Filter（含 Security 代理）
+     *      -> 最后进入 TestDispatcherServlet.doDispatch
+     *   3) DispatcherServlet 走完整 Handler + Resolver 链路（见 UserController 注释块）
+     *   4) MockHttpServletResponse 收集写出结果
+     *   5) ResultMatcher 校验状态/体/头：andExpect(status().isOk())
+     *      jsonPath 解析 JSON 断言
      *
-     * 三、契约测试实践
-     *   1) JSON Schema 校验：
-     *      定义 Schema（JSON Schema Draft 07）：
-     *      {"type":"object","properties":{
-     *        "code":{"type":"integer"},"message":{"type":"string"},
-     *        "data":{"type":["string","null"]},"path":{"type":"string"}},
-     *       "required":["code","message","path"]}
-     *      测试：用 json-schema-validator 校验响应符合 Schema
-     *      好处：一次定义，多处校验（测试/网关/前端）
-     *   2) 快照测试（Snapshot Testing）：
-     *      首次运行记录响应 JSON 快照，后续运行比对
-     *      响应变化时测试失败，人工确认是否预期变更
-     *      工具：jest（JS）/ 自定义 JSON 比对
-     *   3) 消费者驱动契约（Pact）：
-     *      消费方定义期望的响应结构 -> 提供方验证满足
-     *      微服务场景最有效（详见 MessApplicationTests 中的 CDC 说明）
+     * 三、MockMvc vs @SpringBootTest(webEnvironment=RANDOM_PORT) 的差异
+     *   - MockMvc：不起真实端口，最快，但绕开部分网络层（Servlet 实际编码、
+     *     异步请求处理场景的真实超时）
+     *   - RANDOM_PORT：起真实内嵌 Tomcat，TestRestTemplate 真发 HTTP，
+     *     可以验证序列化/反序列化的端到端正确性，但启动慢约 1-2 秒/次
+     *   - 本测试采用 MockMvc 自动配置模式，侧重点在接口行为
      *
-     * 四、泛型擦除的契约影响
-     *   ApiResponse<String> 和 ApiResponse<UserDto> 运行时类型相同（擦除）
-     *   对契约的影响：
-     *   1) 序列化不受影响：Jackson 运行时能拿到实际对象的类
-     *   2) 反序列化受影响：不知道 data 该转成什么类型（变 LinkedHashMap）
-     *   3) 契约文档需显式声明 data 的类型：
-     *      OpenAPI: ApiResponse<String> -> data: { type: string }
-     *      OpenAPI: ApiResponse<UserDto> -> data: { $ref: UserDto }
-     *   4) TypeScript 前端：ApiResponse<UserDto> 映射为
-     *      interface ApiResponse<T> { code: number; data: T; ... }
-     *      泛型参数 T 在 TS 侧保留（编译期类型检查）
-     *   5) 本测试用 constructParametricType 显式指定泛型，
-     *      验证反序列化契约的完整性（data 正确还原为 String 而非 LinkedHashMap）
+     * 四、打桩与真实容器的边界原则
+     *   - when(service.xxx()).thenReturn(...) 显式 mock，隔离 Service 层
+     *   - 但要警惕过度 mock：把全部层都 mock 后，
+     *     最后只测了 @RequestMapping 注册是否正确，价值大减
+     *   - 测试金字塔建议：controller 层 mock service（本类）；
+     *     service 层 mock repository；repository 层上 @DataJpaTest 真实测
+     *
+     * 五、MockMvc 诊断输出与调试技巧
+     *   1) .andDo(print()) / .andDo(MockMvcResultHandlers.log())：
+     *      输出完整请求/响应（头/体/处理耗时），是排查 BUG 的第一工具
+     *   2) Content-Type 不匹配诊断：UnsupportedMediaTypeStatusException 会列出
+     *      supported，常见原因是缺请求头或未注册对应 Converter
+     *   3) HttpMessageNotReadableException 表示 JSON 解析失败，先查字段名
+     *      拼写/嵌套结构/枚举值，Jackson 反序列化器会直接抛出定位信息
+     *   4) Security 过滤器拦截（401/403）时先确认过滤器链顺序与
+     *      SecurityContext 是否被注入（print() 可见 SecurityContext 属性）
+     *   5) 静态导入 get()/status()/jsonPath() 让链式调用可读性最佳
+     *
+     * 六、参数注入与默认值的 MockMvc 行为
+     *   1) @RequestParam(defaultValue = World) 在请求无 name 参数时生效，
+     *      MockMvc 不传 .param(name) 即可验证默认分支
+     *   2) 传空字符串 .param(name, ) 不会触发默认值，而是得到空串
+     *   3) 中文参数需 .param(name, 张三) + UTF-8 编码断言，
+     *      或使用 .contentType(TEXT_PLAIN) + UTF-8 避免乱码
+     *   4) 断言响应体优先用 content().string 而非 jsonPath（字符串响应更直接）
      * =========================================================================
      */
 }

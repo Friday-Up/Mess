@@ -82,60 +82,71 @@ public class GlobalExceptionHandler {
 
     /*
      * =========================================================================
-     * 【分布式系统】跨服务异常传播与可观测性（非可执行代码）
+     * 【Spring 内幕】HandlerExceptionResolver 链与 @ControllerAdvice 的注册原理（非可执行代码）
      * =========================================================================
      *
-     * 一、微服务中的异常传播
-     *   单体：异常在同一进程内传播，try-catch 直接捕获
-     *   微服务：服务 A 调服务 B，B 的异常通过网络返回 A
-     *   问题：B 的异常类型/堆栈在 A 侧不一定能反序列化
-     *   方案：
-     *   1) HTTP 状态码 + 错误体：B 返回 4xx/5xx + ApiResponse，
-     *      A 侧按状态码处理，解析错误体获取 message
-     *   2) Feign ErrorDecoder：Feign 调用时自定义 ErrorDecoder，
-     *      将 B 的错误体转换为 A 侧的业务异常
-     *   3) 异常语义化：B 返回的错误码是业务语义（409/404），
-     *      A 侧按业务语义处理，不依赖 B 的异常类
-     *   4) 不透传堆栈：B 的堆栈不返回给 A（安全+带宽），
-     *      A 只拿到 code/message/traceId
+     * 一、异常在 DispatcherServlet 内部的传播与拦截
+     *   1) Handler 步骤（Controller/Service/Repository）抛出
+     *      ResourceNotFoundException（本类捕获的异常）
+     *   2) DispatcherServlet.processDispatchResult 调用
+     *      doResolveException -> HandlerExceptionResolverComposite
+     *   3) 遍历三条 Resolver（顺序敏感，先匹配先返回）：
+     *      a. ExceptionHandlerExceptionResolver：搜索 @ControllerAdvice 的
+     *         @ExceptionHandler 匹配
+     *      b. ResponseStatusExceptionResolver：处理 @ResponseStatus
+     *         与 ResponseStatusException
+     *      c. DefaultHandlerExceptionResolver：处理 Spring 框架标准异常（如 405）
+     *   4) 本类标注 @ExceptionHandler(ResourceNotFoundException.class) 在 a 步撞中
+     *      -> 返回 ModelAndView（空）+ 状态码 404 -> 交给视图或响应处理
+     *   5) 若没有任何 Resolver 命中 -> 异常继续向上抛给容器 -> 500 页面
      *
-     * 二、分布式链路追踪（Distributed Tracing）
-     *   跨服务调用的问题：请求经过 网关 -> 服务 A -> 服务 B -> DB，
-     *   任一环节慢/错，如何定位？
-     *   方案：traceId 贯穿整条链路
-     *   1) 生成：入口（网关）生成 traceId（如 64-bit hex）
-     *   2) 传播：HTTP Header（W3C traceparent/b3）/ MQ Header 传递
-     *   3) 记录：每个服务将 traceId 记入日志（MDC + %X{traceId}）
-     *   4) 收集：SkyWalking/Zipkin/Jaeger 收集 Span，绘制调用链路图
-     *   5) 关联：前端报错返回 traceId -> 查日志 -> 查链路图 -> 定位慢/错环节
-     *   Spring Boot 3 + Micrometer Tracing：
-     *   - 自动埋点：HTTP 客户端/服务端、JDBC、Redis、Kafka
-     *   - MDC 自动注入 traceId/spanId
-     *   - 配置：management.tracing.sampling.probability=1.0（全采样）
+     * 二、@ControllerAdvice 的扫描与缓存机制
+     *   1) 启动时 RequestMappingHandlerAdapter.afterPropertiesSet
+     *      -> ControllerAdviceBean.findAnnotatedBeans(ApplicationContext)
+     *      找到所有 @ControllerAdvice 且非 scopedProxy 的 Bean
+     *   2) ExceptionHandlerMethodCache：每个 Advice 的 @ExceptionHandler 方法
+     *      按异常类型注册进 mappedMethods（按异常深度优先排序）
+     *   3) 运行时按异常类 -> 类及父类超类 -> 最精确匹配找到 handler method
+     *   - @RestControllerAdvice = @ControllerAdvice + @ResponseBody
+     *   - 可以限定 basePackages/classes 扫描范围（精细控制 Advice 的作用域）
+     *   - 全局 Advice 应保持无状态（多线程并发访问）
      *
-     * 三、分布式日志聚合
-     *   单体：日志在本地文件，grep 即可
-     *   微服务：日志分散在 N 个 Pod，需聚合查询
-     *   方案：
-     *   1) ELK：Filebeat 采集 -> Logstash 解析 -> Elasticsearch 存储 -> Kibana 查询
-     *   2) Loki：轻量级，Promtail 采集 -> Loki 存储 -> Grafana 查询
-     *   3) 结构化日志：JSON 格式，含 traceId/level/logger/message
-     *      {"traceId":"a1b2c3","level":"ERROR","logger":"c.e.m.e.GlobalExceptionHandler",
-     *       "message":"...","stackTrace":"..."}
-     *   4) 查询：按 traceId 聚合一次请求在所有服务的日志
+     * 三、本类三个 ExceptionHandler 分别映射的语义
+     *   1) handleResourceNotFound：找不到资源 -> 404 + ApiResponse(false)
+     *   2) handleIllegalArgumentException：参数绑定/手动校验失败 -> 400
+     *   3) handleGenericException：兜底场景 -> 500 + 避免堆栈外泄
+     *   所有处理器都返回 ResponseEntity<ApiResponse>：
+     *   - ResponseEntity 同时控制状态码与体
+     *   - ApiResponse 保证前端有统一解析结构（前端只看 success/message/data）
      *
-     * 四、异常告警与 On-Call
-     *   1) 告警分级：
-     *      P0：全站不可用，5 分钟内响应，电话叫醒
-     *      P1：核心功能不可用，15 分钟内响应，企业微信/钉钉
-     *      P2：非核心功能异常，工作时间处理
-     *      P3：潜在问题，排期处理
-     *   2) 告警规则：
-     *      5xx 速率 > 1%/min -> P1
-     *      单接口 P99 > 2s 持续 5min -> P2
-     *      ERROR 日志 > 100/min -> P2
-     *   3) 告警收敛：同一根因的告警合并，避免告警风暴
-     *   4) On-Call 轮值：周轮值，交接文档，告警升级机制
+     * 四、全局异常处理与安全过滤器的边界
+     *   - Spring Security 的 Filter 链异常不会进入 HandlerExceptionResolver
+     *     （在 DispatcherServlet 之前，由 ExceptionTranslationFilter 处理）
+     *   - 鉴权失败 -> AuthenticationEntryPoint（401 重定向到登录页）
+     *   - 授权失败 -> AccessDeniedHandler（403）
+     *   因此业务层异常走 GlobalExceptionHandler，安全层异常走安全过滤器，
+     *   两者分工清晰，不互相覆盖
+     *
+     * 五、Advice 细节与异常处理优先级陷阱
+     *   1) 同一异常在多个 Advice 都有匹配方法时默认取第一个匹配，
+     *      Order 未配置可能落到非预期的 Advice：用 @Order 显式声明优先级
+     *   2) 匹配规则不只精确类型，还查父类/父接口（Throwable 顶层兜底）
+     *   3) @RestControllerAdvice = @ControllerAdvice + @ResponseBody，
+     *      本项目用它统一返回 ApiResponse，避免每个方法重复注解
+     *   4) Advice 应避免吞掉异常链：日志记录 stackTrace 仍然必要，
+     *      只把用户可见的信息脱敏后放入 message
+     *   5) 测试策略：@WebMvcTest 只引入 Controller + Advice，
+     *      每个异常写最少 1 个用例（404/400/500 各一），守住 API 契约
+     *
+     * 六、Spring 框架标准异常到 HTTP 状态码的映射表
+     *   HttpRequestMethodNotSupportedException -> 405（方法不受支持）
+     *   HttpMediaTypeNotSupportedException -> 415（Content-Type 不匹配）
+     *   MissingServletRequestParameterException -> 400（缺必填参数）
+     *   MethodArgumentTypeMismatchException -> 400（类型转换失败）
+     *   ConstraintViolationException -> 400（Bean Validation 校验失败）
+     *   NoHandlerFoundException -> 404（无匹配路由，需配置 add-mappings=false）
+     *   这些默认由 DefaultHandlerExceptionResolver 映射，
+     *   本类不需要重复处理，只在需要统一 ApiResponse 包装时覆盖对应映射
      * =========================================================================
      */
 }

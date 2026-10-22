@@ -129,54 +129,53 @@ public class HelloController {
 
     /*
      * =========================================================================
-     * 【微服务模式】服务发现与健康检查（非可执行代码）
+     * 【Spring 内幕】从 Tomcat NIO 到 Handler：监听、分发与过滤器链（非可执行代码）
      * =========================================================================
      *
-     * 一、服务发现（Service Discovery）
-     *   单体：所有模块在同一进程，直接方法调用
-     *   微服务：服务实例动态伸缩（K8s Pod 扩缩容），IP 不固定
-     *   服务发现问题：订单服务如何找到用户服务的可用实例？
-     *   方案一：客户端发现（Client-Side Discovery）
-     *   - 服务注册：用户服务启动时向注册中心（Nacos/Eureka）注册 IP:Port
-     *   - 服务发现：订单服务从注册中心拉取用户服务实例列表
-     *   - 负载均衡：订单服务客户端负载均衡（Ribbon/LoadBalancer）选实例
-     *   方案二：服务端发现（Server-Side Discovery）
-     *   - 路由：请求先到负载均衡器（K8s Service/网关）
-     *   - 均衡：负载均衡器查询注册中心，选实例转发
-     *   - 客户端无感知，只需访问虚拟 IP/域名
-     *   K8s 原生方案：K8s Service + CoreDNS = 服务端发现
-     *   - 用户服务：Service user-service -> Pod 列表
-     *   - 订单服务：访问 http://user-service:8080 -> CoreDNS 解析 -> Service 转发
-     *   - 无需额外注册中心（K8s 自带）
-     *   Spring Cloud 方案：Nacos/Eureka + LoadBalancer
-     *   - @LoadBalanced RestTemplate/WebClient 自动服务发现 + 负载均衡
-     *   - Feign/OpenFeign 声明式调用：@FeignClient("user-service")
+     * 一、一次 /hello?name=Spring 请求的网络与线程模型（内嵌 Tomcat 10）
+     *   1) Acceptor 线程（1 个）：ServerSocket.accept() 接收 TCP 连接
+     *   2) Poller 线程（默认 1-2 个）：基于 NIO Selector 监听 OP_READ 就绪事件，
+     *      就绪后包装为 NioChannel 投递到 Executor 线程池
+     *   3) Executor 线程池（默认 maxThreads=200，minSpareThreads=10）：
+     *      负责实际解析 HTTP 头、读取 Request 体并执行 Servlet 调用链
+     *   4) 本类 hello() 方法运行在 Executor 线程中，返回字符串后等响应
+     *      写出完成线程才回池
+     *   可见一个简单 Hello 也要经过：TCP -> NIO -> HTTP 解析 -> Filter 链
+     *   -> DispatcherServlet -> HandlerAdapter -> 方法，共 6 层
      *
-     * 二、健康检查与服务注册的关系
-     *   注册中心需要知道实例是否健康：
-     *   1) 心跳机制：实例定时向注册中心发心跳（Nacos 5s/次）
-     *   2) 健康检查端点：注册中心定时调用 /actuator/health
-     *   3) K8s 探针：livenessProbe 失败 -> 重启 Pod；readinessProbe 失败 -> 摘除流量
-     *   4) 优雅上下线：
-     *      上线：健康检查通过后注册中心才推送实例（避免流量打到未就绪实例）
-     *      下线：先从注册中心注销 -> 等待流量排空 -> 再关闭进程
-     *   本项目 /hello 可作为简易健康检查端点：
-     *   - 验证"请求 -> 认证 -> 序列化 -> 响应"全链路
-     *   - 生产环境建议用 /actuator/health（框架级，更全面）
+     * 二、Filter 过滤器链的执行顺序与 DelegatingFilterProxy 桥接
+     *   Spring Security 注册的是一个 FilterChainProxy（由 springFilterChain 提供）：
+     *   - 它本质是 jakarta.servlet.Filter，注册到 ServletContext 时通过
+     *     DelegatingFilterProxy 包装 -> 代理 BeanFactory 中的 springSecurityFilterChain
+     *   - 请求进入 FilterChainProxy 后按 SecurityFilterChain 列表匹配：
+     *     本项目只注册了一条链，链上默认约 12-16 个 Filter（顺序敏感）：
+     *     DisableEncodeUrlFilter -> ForceEagerSessionCreationFilter ->
+     *     ChannelProcessingFilter -> WebAsyncManagerIntegrationFilter ->
+     *     SecurityContextHolderFilter -> HeaderWriterFilter -> CsrfFilter ->
+     *     LogoutFilter -> UsernamePasswordAuthenticationFilter ->
+     *     RequestCacheAwareFilter -> SecurityContextHolderAwareRequestFilter ->
+     *     AnonymousAuthenticationFilter -> SessionManagementFilter ->
+     *     ExceptionTranslationFilter -> AuthorizationFilter
+     *   - 本类 /hello/** 被 permitAll()，授权过滤器直接放行
+     *   - 若访问 /api/users/** 则 AuthorizationManager.decide() 检查当前
+     *     SecurityContext 中的 Authentication 是否已认证（表单登录）
      *
-     * 三、弹性模式（Resilience Patterns）
-     *   微服务调用链中任一环节故障都可能雪崩：
-     *   1) 超时（Timeout）：下游调用设置超时（2s），避免线程阻塞
-     *   2) 重试（Retry）：可重试错误（网络抖动）重试 3 次，需幂等
-     *   3) 熔断（Circuit Breaker）：错误率 >50% 时熔断 10s，
-     *      熔断期间快速失败（不调下游），10s 后半开试探
-     *      实现：Resilience4j @CircuitBreaker
-     *   4) 降级（Fallback）：熔断/超时时返回兜底数据
-     *      如：用户服务降级 -> 返回缓存数据或默认值
-     *   5) 舱壁（Bulkhead）：隔离资源，每个下游调用独立线程池/信号量
-     *      如：用户服务调用线程池 10 个，订单服务 10 个，互不影响
-     *   6) 限流（Rate Limiting）：限制自身处理速率，保护下游
-     *   Spring Cloud 全家桶：Resilience4j（熔断/限流/舱壁）+ LoadBalancer（负载均衡）
+     * 三、SecurityContext 的线程绑定与跨线程传播风险
+     *   - SecurityContextHolderStrategy（默认 ThreadLocal 模式）：用户身份
+     *     存储在当前线程的 ThreadLocal，过滤器读取后放入 Request
+     *   - 若在本类方法内开启 @Async 子线程，子线程默认看不到安全上下文，
+     *     需配置 DelegatingSecurityContextRunnable（WebAsyncManagerIntegrationFilter）
+     *   - WebFlux/Reactor 场景则使用 ReactorContext 模式替代 ThreadLocal
+     *
+     * 四、健康检查的框架层实现与最佳实践
+     *   1) Spring Boot Actuator 的 /actuator/health 是 framework-level 实现：
+     *      内置 HealthIndicator（db/diskSpace/redis/discoveryClient）自动探测，
+     *      StatusAggregator 聚合为 UP/DOWN/UNKNOWN
+     *   2) 与 K8s 探针对接（ManagementProbesHealthContributorHandlerMapping）：
+     *      liveness 只看应用自身，失败重启 Pod；readiness 额外检查外部依赖，
+     *      失败摘除流量（management.endpoint.health.probes.enabled=true）
+     *   3) 本类 /hello 作为最小健康检查的适用场景：验证路由+序列化+响应
+     *      全链路且无重外部依赖；大流量场景注意限流，避免与业务 API 竞争线程
      * =========================================================================
      */
 }
