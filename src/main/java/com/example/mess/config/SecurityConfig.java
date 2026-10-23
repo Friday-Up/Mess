@@ -143,76 +143,66 @@ public class SecurityConfig {
 
     /*
      * =========================================================================
-     * 【Spring 内幕】@Configuration 的 CGLIB 增强与 BeanDefinition 注册机制（非可执行代码）
+     * 【Java 并发】SecurityContext 的线程传播、ThreadLocal 策略与异步链路（非可执行代码）
      * =========================================================================
      *
-     * 一、Full 模式 vs Lite 模式：@Configuration 与 @Component 的关键差异
-     *   本类的 @Configuration 让 ConfigurationClassPostProcessor 走 Full 模式：
-     *   - Full 模式：配置类会被 CGLIB 生成子类（Enhancer），任何 @Bean 方法
-     *     调用同类中其他 @Bean 方法都会被拦截并走 BeanFactory.getBean()，
-     *     确保返回的是同一个单例 bean
-     *   - Lite 模式（proxyBeanMethods = false 或 @Component）：类不被代理，
-     *     @Bean 方法间的直接调用等价于普通 Java 方法调用，每次都 new 新对象
-     *   演示差异：假设本类有两个 @Bean 方法
-     *     @Bean A a() { return new A(b()); }
-     *     @Bean B b() { return new B(); }
-     *   Full 模式下 a() 中的 b() 被拦截 -> 返回容器中已有的 B 单例；
-     *   Lite 模式下 a() 中的 b() 是原生调用 -> new 出第二个 B
-     *   Spring Boot 2.2+ 的自动配置类大量使用 Lite 模式以避免 CGLIB 开销
-     *   （配置类里方法互不调用时 proxyBeanMethods=false 是最佳实践）
+     * 一、SecurityContextHolder 的四种策略（MODE_*）
+     *   1) MODE_THREADLOCAL（默认）：上下文存 ThreadLocal，绑定当前请求线程
+     *   2) MODE_INHERITABLETHREADLOCAL：子线程会"继承"父线程上下文副本
+     *      用途有限：仅对"主线程直接 new Thread"的场景生效
+     *      局限：Tomcat 线程池复用线程 -> 不会走继承路径，上下文丢失
+     *   3) MODE_GLOBAL：静态 JVM 全局共享，测试代码偶尔使用，Web 勿用
+     *   4) 自定义策略：实现 SecurityContextHolderStrategy 并注册，
+     *      响应式项目里常用"基于 Reactor Context"的实现
      *
-     * 二、@Configuration 类如何被解析为 BeanDefinition
-     *   1) ConfigurationClassPostProcessor（BeanFactoryPostProcessor）在
-     *      refresh() 第 5 步被触发，扫描所有 @Configuration 类
-     *   2) ConfigurationClassParser 解析本类：
-     *      - 类级注解 @EnableWebSecurity 上有 @Import（引入安全核心配置类）
-     *      - @Bean 注解的方法 securityFilterChain / userDetailsService 各生成
-     *        一个 ConfigurationClassBeanDefinition，beanClass 指向工厂方法
-     *        所在类，factoryMethodName 记录方法名
-     *   3) BeanDefinition 元数据：scope=singleton、lazyInit=false、
-     *      primary=false、依赖关系（@DependsOn）等
-     *   4) @Bean 方法间的依赖顺序由方法参数决定：
-     *      securityFilterChain(HttpSecurity http) 需要注入 HttpSecurity bean，
-     *      Spring 推断 BeanDefinition 依赖：先创建 HttpSecurity -> 再构建本方法
+     * 二、Tomcat 线程池与 InheritableThreadLocal 的错配
+     *   1) 期望场景：请求线程启动异步任务，任务线程自动拿到用户身份
+     *   2) 实际行为：Tomcat 工作线程从线程池取线程，此线程不是
+     *      "当前请求线程 new 出来的子线程"，不走 Inheritable 逻辑
+     *   3) 后果：开 MODE_INHERITABLETHREADLOCAL 后，从池中借到的线程
+     *      还带着上一个请求残留的安全上下文 -> 身份串号 + 越权风险
+     *   4) Spring 的解法：DelegatingSecurityContextRunnable/Callable 包装，
+     *      把父线程上下文复制进任务再传给线程池（TaskDecorator 配合）
+     *   5) Spring Security 的 WebAsyncManagerIntegrationFilter 正是
+     *      自动为 @Async、DeferredResult、Callable 完成这个复制与清理
      *
-     * 三、BeanPostProcessor：所有 Bean 实例化后的流水线工位
-     *   本类产生的两个 Bean 都会流经已注册的后置处理器链：
-     *   - AutowiredAnnotationBeanPostProcessor：处理 @Autowired（本类方法
-     *     参数注入即其职责延伸）
-     *   - CommonAnnotationBeanPostProcessor：处理 @PostConstruct / @PreDestroy
-     *   - ApplicationContextAwareProcessor：回调 Aware 接口
-     *   - Servlet 环境：ServletContextAwareProcessor / WebApplicationContextAwareProcessor
-     *   每个后置处理器有 postProcessBeforeInitialization 与
-     *   postProcessAfterInitialization 两个钩子，初始化注解、Aware 回调、
-     *   AOP 代理生成都在这里发生
-     *   生产提示：后置处理器数量是启动性能的最大变量之一，过多会使每个 Bean
-     *   实例化都经过大量判断（Spring Boot 空项目约 12 个后置处理器）
+     * 三、SecurityContext 在 @Async 场景的正确姿势
+     *   1) 场景：Controller 里 @Async 方法记录审计日志，日志需要用户信息
+     *   2) 步骤：
+     *      - 全局配置 TaskDecorator：复制 SecurityContext、MDC、RequestContextHolder
+     *      - 线程执行完任务后清理（finally），否则线程复用引起串号
+     *   3) 代码骨架：
+     *      class ContextTaskDecorator implements TaskDecorator {
+     *         public Runnable decorate(Runnable task) {
+     *            var ctx = SecurityContextHolder.getContext();
+     *            var mdc = MDC.getCopyOfContextMap();
+     *            return () -> {
+     *               try { SecurityContextHolder.setContext(ctx); if (mdc != null) MDC.setContextMap(mdc); task.run(); }
+     *               finally { SecurityContextHolder.clearContext(); MDC.clear(); }
+     *            };
+     *         }
+     *      }
+     *   4) 注意：setContext 传引用是安全的，因为 Authentication 绝大多数实现
+     *      不可变或构造后不修改（UsernamePasswordAuthenticationToken 字段定后不变）
      *
-     * 四、生产环境安全配置的演进清单
-     *   1) 弃用 InMemoryUserDetailsManager + withDefaultPasswordEncoder，
-     *      改为 JdbcUserDetailsManager 或自定义 UserDetailsService + BCrypt，
-     *      cost 因子 >=10 保证单次哈希 >100ms，砌慢暴力破解
-     *   2) 会话固定保护默认开启（migrateSession）：登录后换新 sessionId 防劫持
-     *   3) Remember-Me（RememberMeConfigurer）：TokenBasedRememberMeServices
-     *      与 PersistentTokenRepository 任选，后者更安全（落库可吊销）
-     *   4) CORS 必须显式 .cors(...) + CorsConfigurationSource Bean
-     *   5) HTTPS：容器层 TLS 终止或 requiresChannel().anyRequest().requiresSecure()
-     *   6) 审计事件：注入 AuthenticationSuccessListener 即可捕获登录事件，供风控使用
+     * 四、Spring Security 的并发相关隐患清单
+     *   1) SecurityContextHolderStrategy 被自定义为按请求存储但未在 Filter
+     *      末尾清理 -> 线程复用时身份泄漏（安全漏洞级别，高于脏数据）
+     *   2) 使用 SecurityContextRepository 手动 saveContext 但未走
+     *      SecurityContextHolderFilter 的标准链路 -> 读写不一致
+     *   3) CSRF 禁用（本类 disable）只对无状态 API 安全，
+     *      若未来要加表单登录/Session 功能，必须恢复 CSRF
+     *   4) 并发会话控制：maximumSessions(n).maxSessionsPreventsLogin(true)
+     *      会基于 SessionRegistry 做并发登录限制；与并发线程无关，
+     *      是"同一用户的会话数上限"，配版权系统时常用
      *
-     * 五、SecurityFilterChain 多链匹配与 RequestMatcher
-     *   1) 一个 WebSecurityCustomizer / HttpSecurity 可注册多条链，
-     *      FilterChainProxy 按 RequestMatcher 的注册顺序逐一匹配，
-     *      命中第一条链即处理请求（后面的链不再执行）
-     *   2) 多租户示例（本项目演进方向）：
-     *      securityFilterChainApi(HttpSecurity http)：匹配 /api/**，无状态 JWT
-     *      securityFilterChainWeb(HttpSecurity http)：其余请求，表单登录
-     *      -> 二者用 @Order 与 securityMatcher("/api/**") 区分
-     *   3) @Bean 方法返回类型相同（SecurityFilterChain）不会冲突，
-     *      Spring Boot 3.x 已不再需要设置 bean 名称来区分多条链
-     *   4) 匹配规则常用：requestMatchers().hasRole() / hasAuthority()
-     *      / access((auth, ctx) -> ...)（SpEL 或自定义 AuthorizationManager）
-     *   5) 方法级安全：@EnableMethodSecurity + @PreAuthorize("hasRole('ADMIN')")
-     *      在 Service 方法上再拦一层，与 URL 级规则互补
+     * 五、线程爆炸的检查表（安全相关）
+     *   1) Tomcat 工作线程：jstack 看不到空闲 -> accept 排队 -> 连接拒绝
+     *   2) @Async 线程：队列堆积 -> 内存涨 -> 满了走拒绝策略
+     *   3) 定时任务：若 run() 阻塞且未配并发控制 -> 下次触发又起一线程
+     *      （Spring 的 ThreadPoolTaskScheduler 不会为同任务并发调度）
+     *   4) 缓存加载线程：大 key 全量预热时占满池 -> 业务请求排队等待
+     *      缓存初始化完成后才恢复 -> 用低优先级或独立池隔离
      * =========================================================================
      */
 }

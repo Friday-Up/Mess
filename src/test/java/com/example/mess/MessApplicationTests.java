@@ -56,60 +56,65 @@ class MessApplicationTests {
 
     /*
      * =========================================================================
-     * 【Spring 内幕】Spring TestContext 框架与 @SpringBootTest 启动机理（非可执行代码）
+     * 【Java 并发】并发测试与 TestContext 线程模型：缓存、隔离与竞态检证（非可执行代码）
      * =========================================================================
      *
-     * 一、@SpringBootTest 的查根与加载流程
-     *   1) 测试类执行前，JUnit 5 的 SpringExtension（spring-test 提供）
-     *      先执行 beforeAll -> TestContextManager 构建 TestContext
-     *   2) 查找应用入口：@SpringBootTest 内部有 @SpringBootConfiguration，
-     *      搜索算法（SmartContextLoader）从测试类所在包向上逐级扫描
-     *      -> 找到 com.example.mess.MessApplication 上的 @SpringBootApplication
-     *      （找到标记后不再继续向上，否则可能错误加载到别的应用）
-     *   3) 构造 SpringApplication -> 和生产一致地 run()，
-     *      只是 context 类型换成 MockServletEnvironment 或 Servlet Web App
-     *   4) 本测试类的 contextLoads()：只有 assertThat(context).isNotNull()
-     *      -> 验证容器能起来本身就有价值：自动装配冲突、Bean 循环依赖、
-     *      属性拼写错误这些问题会在此时被一次性发现
+     * 一、@SpringBootTest 的线程环境
+     *   1) 主线程：JUnit 的测试执行线程（IDE/CI 的 surefire 工作线程）
+     *      负责拉起 ApplicationContext、执行每个 @Test 方法、收集结果
+     *   2) 容器引入的后台线程：
+     *      - Tomcat 的 Acceptor/Poller/工作线程池（默认在 RANDOM_PORT 时启动）
+     *      - HikariCP 的 houseKeeper、addConnectionExecutor
+     *      - Spring 的 TaskScheduler（若引入了 @Scheduled）
+     *   3) 主线程不会等后台线程：测试方法一旦返回 -> 线程报告给出结论，
+     *      后台线程若仍在跑异步业务 -> 断言已结束，结果可能晚到 -> 浅断言
+     *      -> 测试看起来过，其实业务没完成（异步测试经典陷阱）
      *
-     * 二、ContextCache：测试性能的命脉
-     *   - 多个测试类同用一套配置（同入口类、同 profile、同属性）时，
-     *     Spring TestContext 只启动一次 ApplicationContext，后续复用
-     *   - contextKey = 配置哈希。一旦有差异（如 @ActiveProfiles(test)），
-     *     就另起一个上下文 -> 测试越多启动越慢（每个上下文几秒起）
-     *   - 本类和 controller/service 测试如果用了不同的 @ActiveProfiles，
-     *     会各起一个容器（观察启动日志能看到 Found N contexts 警告）
-     *   - 优化方向：尽量统一 profile；用 TestConfiguration 减少差异
+     * 二、ContextCache 在多线程/多模块 CI 中的行为
+     *   1) ContextCache 是进程级静态映射，JUnit 的并行执行模式（
+     *      JUnit5 junit.jupiter.execution.parallel.enabled=true）下并发访问
+     *   2) Spring TestContext 框架对 ContextCache 做了同步保护：
+     *      缺失的上下文会被唯一创建（computeIfAbsent），并发取到同一实例
+     *   3) 但 Bean 状态可变时并行测试仍互相干扰：
+     *      - 共享的静态计数器、单例缓存、数据库表
+     *      -> 设计上追求"可重入、可重放、可隔离"的测试
+     *   4) 解决方案分层：
+     *      a) 数据隔离：每个测试用随机用户名/前缀，事务回滚机制
+     *      b) 状态隔离：@DirtiesContext 或用不同的 @MockBean 组合
+     *         触发独立上下文（性能下降换正确性）
+     *      c) 逻辑隔离：把并发验证从集成测试剥离，单独写并发测试类
      *
-     * 三、@Transactional 测试的自动回滚机制
-     *   - 测试方法上加 @Transactional，事务在测试结束后自动 ROLLBACK
-     *     （Spring Test 抽象处理），数据库不留脏数据
-     *   - 配合 @Commit / @Rollback(false) 可显式提交
-     *   - 关键点：只对测试类内部调用线程生效；
-     *     如果测试中另起线程或异步方法访问数据库，回滚边界不可控
+     * 三、并发正确性的测试方法（竞态检测）
+     *   1) 压力式：起 N 个线程循环执行同一操作（如 createUser），
+     *      CountDownLatch 让所有线程同时开跑（barrier 效果）
+     *   2) 断言式：循环结束后断言总数、唯一性、状态一致性
+     *      示例骨架：
+     *      var n = 50; var start = new CountDownLatch(1);
+     *      var done = new CountDownLatch(n);
+     *      for (int i = 0; i < n; i++) { pool.submit(() -> {
+     *         start.await(); try { service.createUser(dto); } finally { done.countDown(); }});}
+     *      start.countDown(); done.await(10, TimeUnit.SECONDS);
+     *      // 断言: 数据库唯一索引外的脏数据数量应为 0
+     *   3) 可靠性问题：竞态可能不每次都出现，跑 10 次才能抓到 1 次，
+     *      CI 应把这类测试标记为 @Tag("race") 长跑而非每次都跑
+     *   4) 工具补强：jcstress、JCIP 的 ConcurrentTest 工具、
+     *      或者针对缓存用 Testcontainers 起真实 Redis 验证分布式互斥
      *
-     * 四、测试里常见但容易踩的坑
-     *   1) @Disabled 忘记删除，测试静默跳过
-     *   2) 用 @Autowired 真实 Controller -> 容器加载慢且隐含集成
-     *      建议分层：控制器用 MockMvc（见控制层测试），单元测试不启容器
-     *   3) 静态字段在容器间泄漏：上下文重建后静态变量不会清零
+     * 四、ThreadLocal 清理在测试中的自检
+     *   1) 测试结束后残留的 ThreadLocal 值可能影响后续测试
+     *      （surefire 默认同线程跑所有测试方法）
+     *   2) 自检技巧：在每个测试方法末尾断言 ThreadLocal.get() == null
+     *   3) JUnit5 的 @BeforeEach 集中清理：执行链路开的每个 ThreadLocal
+     *      在 before 里 clear 一次，finally 在 after 里再 clear 一次
+     *   4) 多线程场景给测试线程也复制必要上下文：
+     *      SecurityContext/MDC 在主线程 -> 异步分支需要 TaskDecorator 复制，
+     *      测试里可用同款装饰器保证行为与生产一致
      *
-     * 五、Spring Boot 测试工具箱速查
-     *   1) @TestConfiguration：仅对当前测试类生效的专用配置，不污染主上下文
-     *   2) TestPropertyValues.of(key=value).applyTo(context)：
-     *      运行时动态注入属性，无需复制 application.yml
-     *   3) OutputCaptureExtension：捕获 System.out/stderr，断言日志行为
-     *   4) TestRestTemplate：RANDOM_PORT 模式下真发 HTTP，可验证序列化端到端
-     *   5) @DataJpaTest：只切 JPA 层（Repository + 内嵌库），事务自动回滚
-     *   6) @Testcontainers：用真实 MySQL 容器替换 H2，规避方言差异带来的
-     *      测试通过但生产报错问题，建议 CI 中至少跑一遍
-     *
-     * 六、CI 流水线的测试分层实践建议
-     *   1) 快层（<30s）：纯 Mockito 单元测试，每个 PR 都跑
-     *   2) 中层（<3min）：@WebMvcTest + @DataJpaTest 切片测试
-     *   3) 慢层（合入门禁）：@SpringBootTest 全量 + Testcontainers 真库
-     *   4) ContextCache 在 CI 上可能失效（每 Job 全新容器），
-     *      计划执行时间时按最坏情况估算，别只看本地缓存命中后的速度
+     * 五、集成测试的三个黄金习惯
+     *   1) 每个并发敏感用例加超时（assertTimeoutPreemptively 或 awaitility）
+     *      否则死锁测试会把整个 CI 挂住
+     *   2) 异步结果必须显式等待断言完成，杜绝 submit 后立即 return
+     *   3) 共享数据随机化（UUID、纳秒时间戳），减少测试间的串扰概率
      * =========================================================================
      */
 }

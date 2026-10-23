@@ -123,58 +123,50 @@ public class UserDto {
 
     /*
      * =========================================================================
-     * 【Spring 内幕】Jackson 序列化内幕：泛型、反射与序列化器缓存（非可执行代码）
+     * 【Java 并发】不可变对象与安全发布：DTO 为何天然线程安全（非可执行代码）
      * =========================================================================
      *
-     * 一、为什么 DTO 要与 Entity 分离（内存与框架层理由）
-     *   - Jackson 序列化 DTO 时基于反射读取 getter，默认只认字段顺序
-     *   - Entity 如果直接输出，会触发关联关系加载（@OneToMany 懒加载代理
-     *     也可能被序列化 -> 诱发 N+1 查询和 LazyInitializationException）
-     *   - DTO 拷贝（本类字段均为简单类型）让序列化边界清晰可控，
-     *     且能自由调整字段顺序或隐藏内部字段
+     * 一、不可变性的形式定义（JLS 视角）
+     *   1) 对象创建后状态不能被修改（所有字段不再被赋值）
+     *   2) 所有字段都是 final（这是可见性保证的必要条件，不可省）
+     *   3) 对象被正确构造（this 未逸出，无构造期共享）
+     *   三条全成立，该对象才称得上不可变（Immutable），可被任意多线程
+     *   无锁共享；缺一条都要按"可变对象"的规则同步
      *
-     * 二、ObjectMapper 写出一个 UserDto 的完整过程
-     *   1) writeValueAsString(dto)：查找 BeanSerializer
-     *   2) BeanSerializer 通过 SerializerCache 查 UserDto 类 -> 自定义或默认
-     *   3) JacksonIntrospector 扫描 public getter/getterField -> BeanPropertyDefinition
-     *      - @JsonProperty 改变字段名；@JsonIgnore 排除字段
-     *      - 本类未加注解 -> 默认所有 getter 逐一输出
-     *   4) 对 Long id：LongSerializer（Jackson 内置）；对 null 字段：NullSerializer
-     *   5) 合成 JSON 字符串，写入 Writer
-     *   关键点：序列化器是按 Class 缓存（ConcurrentHashMap），首次反射慢，
-     *   之后复用 -> 高频接口性能靠类稳定，避免每次动态生成
+     * 二、本 DTO 的不可变性体检
+     *   1) 字段：id/username/email/name/createdAt 均为 String/Long/LocalDateTime，
+     *      成员类型自身不可变（见 User 注释块第四节）
+     *   2) but：字段本身未声明 final，setter 公开 -> 严格意义上是"可变 POJO"
+     *      并发场景里仍可能被 setter 改动（读写竞争）
+     *   3) 升级方案（按成本递增）：
+     *      a) 去除 setter、字段加 final、只保留全参构造（毫无序列化兼容问题
+     *         用 Jackson @JsonCreator 即可）
+     *      b) 改为 Java 17 record（编译器自动 final + equals/hashCode），
+     *         Jackson 2.12+ 原生支持 canonical 构造
+     *   4) 现实折中：本类主要用于"一次性请求响应对象"，生命周期短，
+     *      风险面小；但任何被放入缓存或被异步任务持有的 DTO 必须升级
      *
-     * 三、反序列化的对称流程（POST /api/users 的 @RequestBody）
-     *   1) readValue(json, UserDto.class)：JsonParser 流式读取
-     *   2) 按类的默认构造函数实例化（要求有无参构造，Jackson 的隐含契约）
-     *   3) 逐字段 setter 或字段直写（默认字段可见性规则）
-     *   4) 失败行为：JsonProcessingException -> 由 HttpMessageConverter 包装，
-     *      最终被 GlobalExceptionHandler 转为 400
-     *   进阶：JSON 转换默认不校验业务规则 -> DTO 上需要显式 @Valid 注解
+     * 三、安全发布（Safe Publication）的四种渠道
+     *   1) 基于 volatile 字段引用：写线程把构造好的 DTO 赋给 volatile 变量，
+     *      读线程看到引用时也必然看到全部字段初值（happens-before 传递）
+     *   2) 基于静态初始化器：static final UserDto DEFAULT = new UserDto(...)
+     *      类加载机制保证构造完成前任何线程无法访问
+     *   3) 基于 final 字段语义：在构造函数结束时，final 字段的值对全部
+     *      线程可见（JMM 的 final 语义，无需额外同步）—— record 天然符合
+     *   4) 基于并发容器：放入 ConcurrentHashMap 后，任何 get 到引用的线程
+     *      都能看到构造时的完整状态
+     *   反例：直接把 DTO 赋给普通字段并跨线程读，会发生"看到 null 字段"
+     *   或"字段半初始化"的灵异现象
      *
-     * 四、泛型与 TypeReference：为什么 List<UserDto> 需要特殊处理
-     *   Jackson 处理 List.class 时无法推断元素类型（泛型擦除），
-     *   所以必须传 TypeReference<List<UserDto>> 或 JavaType；
-     *   Spring 的 MethodParameter 在方法签名里保留了泛型信息，
-     *   这就是 ObjectMapper 能正确序列化 Page<UserDto> 的根本原因
-     *
-     * 五、Java 17+ record 的演进对比
-     *   1) record 是不可变数据载体：编译器生成全参构造/getter/equals/hashCode
-     *   2) 传统 DTO（本类）vs record 的本质差异：DTO 可变、Jackson 需无参构造；
-     *      record 不可变、反序列化走 canonical 构造（Jackson 2.12+ 原生支持）
-     *   3) 性能上 record 字段直接访问，少了反射 setter 的开销
-     *   4) 可读性上 record 更接近纯数据表达，适合值对象语义
-     *   5) 兼容性：record 隐式 final 不能被继承，与 @JsonProperty 等注解可共存，
-     *      但有动态属性（如 @ConfigurationProperties）时不适合 record
-     *   6) 本项目保持传统 DTO：兼容 ModelMapper 等工具，迁移需评估全部依赖点
-     *
-     * 六、Bean Validation 与 @Valid 的框架层机制
-     *   1) 参数前加 @Valid -> RequestResponseBodyMethodProcessor 触发 Validator
-     *   2) 校验失败抛 MethodArgumentNotValidException -> 400（需 Advice 捕获）
-     *   3) 常用注解：@NotNull/@NotBlank/@Size(max=50)/@Email/@Pattern
-     *   4) 分组校验：@Validated(Create.class) 区分新增与更新的校验规则
-     *   5) 本类当前未加校验注解，UserService 手动检查用户名/邮箱唯一，
-     *      引入 @Valid 后可把唯一性外的格式校验下沉到 DTO 层
+     * 四、DTO 复制与对象逃逸
+     *   1) convertToDto 的拷贝发生在当前请求线程内，随后立即响应给客户端，
+     *      这是"最安全的逃逸路径"：随请求写入 HTTP 响应后即被 GC
+     *   2) 危险逃逸：把 DTO 塞进 List 缓存，再被另一个请求线程读过期条目
+     *      -> 即便本类升级为不可变，List 本身仍需并发容器保护
+     *   3) 修改已有 DTO 集合：流式 map().collect(Collectors.toList()) 产生
+     *      的 List 是普通 ArrayList，若被跨线程迭代需 unmodifiableList 包装
+     *   4) 排查经验：偶发 ConcurrentModificationException 多来自"一端迭代、
+     *      另一端 add/remove"，根治方式是让集合固化（冻结发布）或换并发容器
      * =========================================================================
      */
 }

@@ -82,71 +82,55 @@ public class GlobalExceptionHandler {
 
     /*
      * =========================================================================
-     * 【Spring 内幕】HandlerExceptionResolver 链与 @ControllerAdvice 的注册原理（非可执行代码）
+     * 【Java 并发】全局异常处理的线程视角：栈、未捕获处理器与异步异常（非可执行代码）
      * =========================================================================
      *
-     * 一、异常在 DispatcherServlet 内部的传播与拦截
-     *   1) Handler 步骤（Controller/Service/Repository）抛出
-     *      ResourceNotFoundException（本类捕获的异常）
-     *   2) DispatcherServlet.processDispatchResult 调用
-     *      doResolveException -> HandlerExceptionResolverComposite
-     *   3) 遍历三条 Resolver（顺序敏感，先匹配先返回）：
-     *      a. ExceptionHandlerExceptionResolver：搜索 @ControllerAdvice 的
-     *         @ExceptionHandler 匹配
-     *      b. ResponseStatusExceptionResolver：处理 @ResponseStatus
-     *         与 ResponseStatusException
-     *      c. DefaultHandlerExceptionResolver：处理 Spring 框架标准异常（如 405）
-     *   4) 本类标注 @ExceptionHandler(ResourceNotFoundException.class) 在 a 步撞中
-     *      -> 返回 ModelAndView（空）+ 状态码 404 -> 交给视图或响应处理
-     *   5) 若没有任何 Resolver 命中 -> 异常继续向上抛给容器 -> 500 页面
+     * 一、异常栈为什么带"线程字段"
+     *   1) 每个 Throwable 构造时通过 fillInStackTrace 抓取当前线程栈快照，
+     *      栈帧依附在抛出它的那个线程上
+     *   2) 打印方式：异常跨线程传播后，日志里的栈仍是"构栈栈"，
+     *      不会变成"打印线程"的栈；这也是异步任务异常排错难的根源之一
+     *   3) 线程名出现在报错头的概率：logback 图案含 %thread，能区分
+     *      pool-2-thread-1 是哪个池（命名规范在此体现价值，见启动注释块）
      *
-     * 二、@ControllerAdvice 的扫描与缓存机制
-     *   1) 启动时 RequestMappingHandlerAdapter.afterPropertiesSet
-     *      -> ControllerAdviceBean.findAnnotatedBeans(ApplicationContext)
-     *      找到所有 @ControllerAdvice 且非 scopedProxy 的 Bean
-     *   2) ExceptionHandlerMethodCache：每个 Advice 的 @ExceptionHandler 方法
-     *      按异常类型注册进 mappedMethods（按异常深度优先排序）
-     *   3) 运行时按异常类 -> 类及父类超类 -> 最精确匹配找到 handler method
-     *   - @RestControllerAdvice = @ControllerAdvice + @ResponseBody
-     *   - 可以限定 basePackages/classes 扫描范围（精细控制 Advice 的作用域）
-     *   - 全局 Advice 应保持无状态（多线程并发访问）
+     * 二、全局异常处理器的调用线程
+     *   1) 本类 @ExceptionHandler 由 DispatcherServlet 调用，
+     *      执行线程 = 抛异常的 Tomcat 工作线程（同一线程，无切换）
+     *   2) 推论：异常处理中可继续使用当前线程的 ThreadLocal 资源
+     *      （安全上下文仍在、事务绑定仍在，但事务已被标记回滚）
+     *   3) 注意：处理逻辑中不可再抛需要回滚的异常否则吞掉，本类用
+     *      ResponseEntity 返回是稳妥做法（HTTP 响应代替异常继续传播）
      *
-     * 三、本类三个 ExceptionHandler 分别映射的语义
-     *   1) handleResourceNotFound：找不到资源 -> 404 + ApiResponse(false)
-     *   2) handleIllegalArgumentException：参数绑定/手动校验失败 -> 400
-     *   3) handleGenericException：兜底场景 -> 500 + 避免堆栈外泄
-     *   所有处理器都返回 ResponseEntity<ApiResponse>：
-     *   - ResponseEntity 同时控制状态码与体
-     *   - ApiResponse 保证前端有统一解析结构（前端只看 success/message/data）
+     * 三、异步链路中的异常传播
+     *   1) @Async void 返回值：异常走 AsyncUncaughtExceptionHandler，
+     *      默认仅打 ERROR 日志 -> 必须注册自定义处理器上报监控/告警
+     *   2) @Async CompletableFuture：异常被封装到 future，
+     *      调用方 .join()/.get() 才抛出 CompletionException（包装原异常）
+     *      忘记 .exceptionally 会默默吞掉错误
+     *   3) CompletableFuture.supplyAsync 不带 Executor 时用 ForkJoinPool，
+     *      异常栈出现在 ForkJoinPool worker 线程 -> 加 taskExecutor 便于区分
+     *   4) 本类可拓展：@ExceptionHandler(CompletionException.class) 解包后
+     *      转给具体异常处理器，避免前端拿到原始并发异常
      *
-     * 四、全局异常处理与安全过滤器的边界
-     *   - Spring Security 的 Filter 链异常不会进入 HandlerExceptionResolver
-     *     （在 DispatcherServlet 之前，由 ExceptionTranslationFilter 处理）
-     *   - 鉴权失败 -> AuthenticationEntryPoint（401 重定向到登录页）
-     *   - 授权失败 -> AccessDeniedHandler（403）
-     *   因此业务层异常走 GlobalExceptionHandler，安全层异常走安全过滤器，
-     *   两者分工清晰，不互相覆盖
+     * 四、UncaughtExceptionHandler 与线程的优雅退出
+     *   1) 线程 run() 抛未捕获异常 -> 线程终止 -> 按 Thread.getUncaughtExceptionHandler
+     *      处理（默认打印 stderr）
+     *   2) Tomcat/Jetty 都为工作线程设置了处理器：把异常交给容器日志，
+     *      并决定是否替换/保留该线程
+     *   3) 自建线程池建议保留 ThreadFactory 的命名与 UncaughtExceptionHandler：
+     *      pool 是你的，栈里没名字没告警，排查就是盲人摸象
+     *   4) 线程终止的内存副作用：ThreadLocal Map 随线程对象销毁而回收，
+     *      但线程池复用线程意味着不销毁 -> 持有的 ThreadLocal 值若指向
+     *      类加载器还会阻止类卸载 -> 严重的内存泄漏点（热部署环境尤甚）
      *
-     * 五、Advice 细节与异常处理优先级陷阱
-     *   1) 同一异常在多个 Advice 都有匹配方法时默认取第一个匹配，
-     *      Order 未配置可能落到非预期的 Advice：用 @Order 显式声明优先级
-     *   2) 匹配规则不只精确类型，还查父类/父接口（Throwable 顶层兜底）
-     *   3) @RestControllerAdvice = @ControllerAdvice + @ResponseBody，
-     *      本项目用它统一返回 ApiResponse，避免每个方法重复注解
-     *   4) Advice 应避免吞掉异常链：日志记录 stackTrace 仍然必要，
-     *      只把用户可见的信息脱敏后放入 message
-     *   5) 测试策略：@WebMvcTest 只引入 Controller + Advice，
-     *      每个异常写最少 1 个用例（404/400/500 各一），守住 API 契约
-     *
-     * 六、Spring 框架标准异常到 HTTP 状态码的映射表
-     *   HttpRequestMethodNotSupportedException -> 405（方法不受支持）
-     *   HttpMediaTypeNotSupportedException -> 415（Content-Type 不匹配）
-     *   MissingServletRequestParameterException -> 400（缺必填参数）
-     *   MethodArgumentTypeMismatchException -> 400（类型转换失败）
-     *   ConstraintViolationException -> 400（Bean Validation 校验失败）
-     *   NoHandlerFoundException -> 404（无匹配路由，需配置 add-mappings=false）
-     *   这些默认由 DefaultHandlerExceptionResolver 映射，
-     *   本类不需要重复处理，只在需要统一 ApiResponse 包装时覆盖对应映射
+     * 五、错误结构化与多线程日志关联
+     *   1) 本类返回 ApiResponse 结构化的统一错误响应，对前端友好
+     *   2) 服务端日志应附 traceId：用 MDC 注入（Filter/Interceptor），
+     *      多线程编排时通过 TaskDecorator 复制 MDC，保证:async-3 与
+     *      pool-1 的日志在同一 traceId 下可关联
+     *   3) 排错口诀：先按 traceId 聚合 -> 再按线程名分组 -> 最后读栈
+     *   4) 敏感信息在异常 message 的脱敏规则同样适用于多线程日志
+     *      采集（ELK 侧做 mask，而非仅在此处理器里做）
      * =========================================================================
      */
 }

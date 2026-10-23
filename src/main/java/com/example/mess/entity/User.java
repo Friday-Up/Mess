@@ -148,69 +148,58 @@ public class User {
 
     /*
      * =========================================================================
-     * 【Spring 内幕】JPA 实体生命周期与持久化上下文的脏检查机制（非可执行代码）
+     * 【Java 并发】实体可变状态的线程安全与 JMM 可见性（非可执行代码）
      * =========================================================================
      *
-     * 一、实体四种状态与转换触发点（Hibernate 6.x）
-     *   1) new/transient：new User() 后，尚未与 EntityManager 关联
-     *   2) managed：save()/persist() 或 findById() 后，处于持久化上下文
-     *   3) detached：上下文关闭/clear/evict 后，丢失关联但保留数据
-     *   4) removed：调用 remove() 后，等待 flush 时执行 DELETE
-     *   本项目的 save() 实现来自 SimpleJpaRepository：
-     *   - 仅当实体主键为 null 时调用 entityManager.persist（新增）
-     *   - 已有主键则调用 merge -> 产生复制到托管副本的效果
-     *   这就是写代码时 save 既能新增也能更新的容器层原因
+     * 一、本实体在运行时的线程分布
+     *   1) 本实体是"事务内临时对象"的典型：加载数据后委托给当前请求线程，
+     *      事务结束随持久化上下文清理，通常不跨线程共享
+     *   2) 一旦脱离事务（如推送消息、异步任务、缓存存对象引用），
+     *      实体对象会被多个线程同时看到，setUsername 与 getUsername 可能并发：
+     *      写线程 set 后，读线程下一行可能仍读到旧值（可见性问题的实体版）
+     *   3) 实体字段为 String/Long/LocalDateTime，单个引用赋值是原子的，
+     *      但"用户名变更 + 邮箱变更"的复合写并非原子，读方可能看到
+     *      新用户名 + 旧邮箱的组合 -> 业务语义的中间态
      *
-     * 二、脏检查与最小变更 UPDATE：不用写 UPDATE 也能更新字段
-     *   事务内：
-     *   1) 加载：findById -> User 进入持久化上下文，快照副本同时保存
-     *   2) 业务修改：setter 赋值（本类 setEmail/setName 等）
-     *   3) flush（事务提交或手动 flush 时）：
-     *      Hibernate 比较当前实体与快照 -> email 变了
-     *      -> 生成 UPDATE USER SET email=? WHERE id=?
-     *      仅 changed 字段参与 SET（@DynamicUpdate 时，否则全字段）
-     *   4) 事务提交 -> DB 生效
-     *   注意：事务外的 setter 修改不会触发 update（实体已 detached）
+     * 二、synchronized 与 Lock 的适用场景对比
+     *   1) synchronized 方法/块：JVM 内建，获取与释放由编译器保证，
+     *      异常时自动释放，简单够用；不可中断、不可超时、非公平
+     *   2) ReentrantLock：可中断（lockInterruptibly）、可超时（tryLock）、
+     *      可公平（FairSync）、可与 Condition 配合精细唤醒；必须 finally unlock
+     *   3) 本实体相关的场景：若要在内存中维护"用户变更榜单"这种共享结构，
+     *      高竞争时 ReentrantLock 性能更平稳；一般竞争 synchronized 即可
+     *   4) 误区：给 setter 加 synchronized 并不能解决可见性问题以外的
+     *      语义原子性 -> 外部调用方仍是"先 set 再 get"，需要把复合操作
+     *      封装到一个同步方法里（单一同步点），才真正解决问题
      *
-     * 三、一级缓存（PersistenceContext）与重复查询的省钱机制
-     *   同一事务/上下文中：
-     *   1) findById(1L) -> 查库 -> 实体与快照入上下文
-     *   2) 再次 findById(1L) -> 直接命中上下文缓存，不查库
-     *   3) findByUsername 不同路径（JPQL/原生 SQL）默认绕开一级缓存，
-     *      会查库并按主键返回上下文中已有托管对象（保证引用同一）
-     *   一级缓存生命周期 = EntityManager 生命周期 = 一个事务（通常勿跨事务共享）
+     * 三、volatile 与实体的对齐
+     *   1) volatile 保证可见性与单变量读写顺序，不保证复合原子性：
+     *      private volatile boolean dirty; 适合做"标记位"（停机、脏标记）
+     *   2) 若本实体作为共享的缓存对象（如"用户在线状态表"），
+     *      字段加 volatile 可避免读线程缓存旧值，但仍有复合中间态问题
+     *   3) 更稳的做法：把可变实体按业务场景改造为不可变 DTO 再共享
+     *      （copy-on-write），写入方换整个对象引用，读取方拿到一致的快照
+     *   4) 实体与 DTO 的分界在此点体现价值：实体留在事务线程内（可变），
+     *      DTO 泛滥并发场景（不可变），见 UserDto 注释块
      *
-     * 四、flush 的隐式触发时机（最容易被忽略的边界）
-     *   - 事务提交前 commit -> flush
-     *   - 执行同类或带查询方法的 JPQL/SQL 查询前（auto flush）
-     *   - 手动调用 EntityManager.flush()
-     *   - saveAndFlush() 常见用途：立即写入数据库，便于立刻验证唯一约束
+     * 四、Long、String、时间类型的并发友好性
+     *   1) String：不可变，多线程只读安全；唯一的坑是 interned/substring
+     *      内容大时内存放大（老 JDK），现代 JDK substring 拷贝很安全
+     *   2) Long：对象引用赋值原子（32 位 JVM 上 long/double 例外），
+     *      一般无需 volatile；但 Long 的 hashCode 缓存是惰性写入的可变状态，
+     *      重复计算安全（幂等），不构成风险
+     *   3) LocalDateTime：不可变，内部状态固定，天然线程安全；
+     *      老代码常见 Date 是可变且非线程安全，跨线程传递 Date 必须防御拷贝
+     *   4) 集合字段是最大隐患：List/Set/Map 在实体里做值对象时，
+     *      应构造时定死并返回不可变视图（List.copyOf / unmodifiableList）
      *
-     * 五、N+1 问题与本项目的预防点
-     *   - 如果 User 有 @OneToMany 关联（当前没有），使用 findAll() 再遍历关联，
-     *     会触发 N 条额外 SQL（即 N+1 问题）
-     *   - 当前设计：本实体无关联关系（单表实体）+ DTO 只暴露需要的字段，
-     *     天然规避 N+1；增加关联时记得 @Fetch(JOIN) 或 EntityGraph 优化
-     *
-     * 六、乐观锁与并发更新机制
-     *   1) 脏检查的并发边界：两个事务同时更新同字段会丢失更新（lost update）
-     *   2) @Version 乐观锁实现原理：加载时快照记录 version，更新时执行
-     *      UPDATE USER SET version=version+1 WHERE id=? AND version=?，
-     *      命中行数为 0 时抛 ObjectOptimisticLockingFailureException
-     *   3) 悲观锁 SELECT ... FOR UPDATE 适合热点行，但持锁久有死锁风险
-     *   4) 跨实例的分布式锁（Redisson）弥补乐观锁无法覆盖的场景，
-     *      注意锁粒度与超时租约，避免锁泄漏卡死系统
-     *   5) 项目决策点：当前 User 写入低频，最小可行解是不加锁；
-     *      未来出现同时改邮箱等需求时，引入 @Version 成本最低
-     *
-     * 七、JPA 缓存层级与 Spring Cache 的关系
-     *   1) 一级缓存：PersistenceContext，事务级，默认开启
-     *   2) 二级缓存：SessionFactory 级，跨事务共享，需显式开启
-     *      并标注 @org.hibernate.annotations.Cache(usage = READ_WRITE)
-     *   3) Spring Cache（本项目的 users 缓存）：应用级缓存，
-     *      在 Service 层生效，对 Repository 层透明，两层可叠加
-     *   4) 叠加原则：一级缓存防重复 SQL、Spring Cache 防重复业务方法、
-     *      二级缓存只在高并发读且实体更新少的场景启用
+     * 五、对象发布与逸出的最小规则
+     *   1) 不要在构造器中启动线程并传 this（this 逸出，半成品对象被读到）
+     *   2) 不要在构造器中注册回调并共享 this（同上，改为 init 方法或工厂后注册）
+     *   3) 单例 Bean 持有实体集合：集合本身用并发容器，条目仍可能被并发 set
+     *      -> 选型：要么不可变条目 + 并发容器，要么整体加同步
+     *   4) 日志打印实体时：对象被其他线程改动会出现"打印时的状态不是
+     *      逻辑时刻的状态"，测试报告里偶现的诡异值往往源于此
      * =========================================================================
      */
 }

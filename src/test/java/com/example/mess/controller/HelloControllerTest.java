@@ -177,60 +177,54 @@ class HelloControllerTest {
 
     /*
      * =========================================================================
-     * 【Spring 内幕】MockMvc 内幕：MockServletEnvironment 与请求模拟（非可执行代码）
+     * 【Java 并发】MockMvc 的线程模型与并发请求模拟（非可执行代码）
      * =========================================================================
      *
-     * 一、MockMvc.build() 做了什么
-     *   1) 自动配置模式下，MockMvcAutoConfiguration 组装出 MockMvcBuilder：
-     *      内部构造 TestDispatcherServlet（DispatcherServlet 的测试子类）
-     *   2) 注册 HandlerMapping + HandlerAdapter + ExceptionResolver +
-     *      HttpMessageConverter -> 与生产装配尽量一致
-     *   3) MockMvc 本质是把 HTTP 请求模拟成对象（MockHttpServletRequest），
-     *      跳过 Tomcat 网络/线程层，直接在调用线程里走 DispatcherServlet
-     *      -> 快（毫秒级）且不需要起 Web 服务器
+     * 一、MockMvc 执行发生在哪个线程
+     *   1) 默认下 MockMvc.perform(...) 在测试主线程内同步执行：
+     *      构造 MockHttpServletRequest -> 直接调用 DispatcherServlet.doDispatch
+     *      -> 处理完成后立即返回 MvcResult -> 断言
+     *   2) 与真实 Tomcat 的差异：
+     *      - 没有真正的 Acceptor/Poller/网络 IO 线程
+     *      - 没有线程池排队 -> 并发竞争无法再现（死锁、线程饥饿测不出来）
+     *      - 没有 Servlet AsyncContext 超时的真实触发
+     *   3) 结论：MockMvc 用于"业务契约与序列化路径"的正确性测试，
+     *      并发行为必须换工具（真实容器 + 压测，或并发测试类）
      *
-     * 二、perform() 内部的调用链
-     *   1) MockMvc.perform(get("/hello?name=Spring"))
-     *      -> RequestBuilder 构造 MockHttpServletRequest（含 URI/参数/Header）
-     *   2) MockMvc -> MockFilterChain 串联已注册 Filter（含 Security 代理）
-     *      -> 最后进入 TestDispatcherServlet.doDispatch
-     *   3) DispatcherServlet 走完整 Handler + Resolver 链路（见 UserController 注释块）
-     *   4) MockHttpServletResponse 收集写出结果
-     *   5) ResultMatcher 校验状态/体/头：andExpect(status().isOk())
-     *      jsonPath 解析 JSON 断言
+     * 二、模拟并发请求的两种方式
+     *   1) 直接循环调用（同线程顺序执行）：
+     *      for (int i = 0; i < 100; i++) mockMvc.perform(get("/hello"));
+     *      只验证"多次调用结果一致"，无任何并发效应
+     *   2) 多线程同时打 MockMvc：
+     *      var pool = Executors.newFixedThreadPool(8);
+     *      IntStream.range(0, 100).parallel.forEach(i ->
+     *        mockMvc.perform(get("/hello")));
+     *      注意：MockMvc 不是线程安全的，并发 perform 可能竞态失败
+     *      （内部 RequestContextHolder 等是 ThreadLocal，但拦截器注册表、
+     *       上下文状态可能冲突）-> 官方推荐每个线程独立 build MockMvc
+     *   3) 选型原则：契约验证用单线程 MockMvc；
+     *      并发竞争用 RANDOM_PORT + TestRestTemplate/HttpClient
      *
-     * 三、MockMvc vs @SpringBootTest(webEnvironment=RANDOM_PORT) 的差异
-     *   - MockMvc：不起真实端口，最快，但绕开部分网络层（Servlet 实际编码、
-     *     异步请求处理场景的真实超时）
-     *   - RANDOM_PORT：起真实内嵌 Tomcat，TestRestTemplate 真发 HTTP，
-     *     可以验证序列化/反序列化的端到端正确性，但启动慢约 1-2 秒/次
-     *   - 本测试采用 MockMvc 自动配置模式，侧重点在接口行为
+     * 三、ThreadLocal 在 MockMvc 里的行为差异
+     *   1) RequestContextHolder：MockMvc 在 perform 前设置、perform 后
+     *      清理（FrameworkServlet.processRequest 手动处理），
+     *      行为与真实 Servlet 基本一致
+     *   2) SecurityContext：spring-security-test 提供 @WithMockUser 注解，
+     *      机制是 SecurityContextPostProcessor 在请求前 set、请求后 clear
+     *      单线程测试 OK；多线程并发 perform 时每个线程的上下文管理易失控
+     *   3) MDC：MockMvc 不会自动设置 MDC，测试里想验证链路 ID 需要
+     *      在 mockFilter 里手动 put + clear（finally 块必要）
+     *   4) 任何自定义 Filter 涉及 ThreadLocal：测试必须同样走执行路径，
+     *      否则真实脏数据问题在单测中不会暴露
      *
-     * 四、打桩与真实容器的边界原则
-     *   - when(service.xxx()).thenReturn(...) 显式 mock，隔离 Service 层
-     *   - 但要警惕过度 mock：把全部层都 mock 后，
-     *     最后只测了 @RequestMapping 注册是否正确，价值大减
-     *   - 测试金字塔建议：controller 层 mock service（本类）；
-     *     service 层 mock repository；repository 层上 @DataJpaTest 真实测
-     *
-     * 五、MockMvc 诊断输出与调试技巧
-     *   1) .andDo(print()) / .andDo(MockMvcResultHandlers.log())：
-     *      输出完整请求/响应（头/体/处理耗时），是排查 BUG 的第一工具
-     *   2) Content-Type 不匹配诊断：UnsupportedMediaTypeStatusException 会列出
-     *      supported，常见原因是缺请求头或未注册对应 Converter
-     *   3) HttpMessageNotReadableException 表示 JSON 解析失败，先查字段名
-     *      拼写/嵌套结构/枚举值，Jackson 反序列化器会直接抛出定位信息
-     *   4) Security 过滤器拦截（401/403）时先确认过滤器链顺序与
-     *      SecurityContext 是否被注入（print() 可见 SecurityContext 属性）
-     *   5) 静态导入 get()/status()/jsonPath() 让链式调用可读性最佳
-     *
-     * 六、参数注入与默认值的 MockMvc 行为
-     *   1) @RequestParam(defaultValue = World) 在请求无 name 参数时生效，
-     *      MockMvc 不传 .param(name) 即可验证默认分支
-     *   2) 传空字符串 .param(name, ) 不会触发默认值，而是得到空串
-     *   3) 中文参数需 .param(name, 张三) + UTF-8 编码断言，
-     *      或使用 .contentType(TEXT_PLAIN) + UTF-8 避免乱码
-     *   4) 断言响应体优先用 content().string 而非 jsonPath（字符串响应更直接）
+     * 四、压测替代方案对比与选型
+     *   1) 单元级 + 单线程：MockMvc（本类），毫秒级，覆盖控制器路由
+     *   2) 集成级 + 并发：@SpringBootTest(RANDOM_PORT) + TestRestTemplate，
+     *      每个请求真实建 TCP/响应，能测连接池、线程池
+     *   3) 全链路压测：应用打包后 Gatling/JMeter/k6，模拟真实并发与吞吐
+     *      发现 MockMvc 永远抓不到的死锁、连接池耗尽、锁竞争热点
+     *   4) 混沌视角：在压测中注入异常（延迟、丢包），验证超时降级逻辑
+     *      这是"保护性并发设计"是否真正生效的唯一考验方式
      * =========================================================================
      */
 }

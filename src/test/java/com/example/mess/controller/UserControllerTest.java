@@ -220,61 +220,56 @@ class UserControllerTest {
 
     /*
      * =========================================================================
-     * 【Spring 内幕】@WebMvcTest 切片测试与 Spring Security Mock 上下文（非可执行代码）
+     * 【Java 并发】Controller 切片测试的线程心智与竞态点定位（非可执行代码）
      * =========================================================================
      *
-     * 一、@WebMvcTest 是怎么裁剪 ApplicationContext 的
-     *   1) @WebMvcTest(UserController.class) 触发 TypeExcludeFilters
-     *   2) 加载的 Bean 只包含：
-     *      - @Controller + @ControllerAdvice + @JsonComponent + Filter/WebMvcConfigurer
-     *      - 不包括 @Service/@Repository/@Component
-     *   3) 所以控制器依赖的 UserService 必须显式提供 -> @MockBean
-     *      （否则 NoSuchBeanDefinitionException：依赖注入失败）
-     *   4) 好处：上下文更小、启动更快，且强制单层测试聚焦
-     *   5) 代价：覆盖面有限，跨层缺陷（如 SQL 错误）不会暴露
+     * 一、@WebMvcTest 的线程边界
+     *   1) 切片测试裁剪了 Bean，但没裁剪线程模型：执行仍在测试主线程，
+     *      单线程串行执行每个 @Test 方法
+     *   2) @MockBean 是线程安全依赖：Mockito 代理对所有线程暴露同一
+     *      stub 注册表（内部 ConcurrentHashMap），但并发的 when().thenReturn
+     *      配置会互相覆盖 -> 测试方法的 stub 定义应在测试开始前完成，
+     *      不要在执行中动态改 stub
+     *   3) MockMvc 同前述：单线程契约测试专用；并发场景不开 @WebMvcTest
      *
-     * 二、@MockBean 的实现原理
-     *   1) @MockBean 是 spring-test 提供，在上下文准备阶段插入
-     *      MockitoFactoryBean 生成 Mockito 代理（CGLIB + 拦截器）
-     *   2) 用户用 when(...).thenReturn(...) 控制返回值
-     *   3) 注意：@MockBean 会改变 contextKey -> 会新建一个上下文，
-     *     与其他不使用 @MockBean 的测试共用缓存变差
-     *   4) @SpyBean：包装真实 Bean，默认走真实方法，可选择性打桩
-     *      （适合需要部分真实逻辑 + 部分隔离的场景）
+     * 二、竞态点在 MVC 链路中的可能性地图
+     *   1) 路由匹配：启动期注册到 urlLookup（ConcurrentHashMap 写一次），
+     *      运行期只读 -> 无并发风险
+     *   2) 参数绑定：HandlerMethodArgumentResolver 复用实例，多数实现
+     *      无状态；但自定义解析器若缓存了请求相关数据到字段就危险
+     *   3) 拦截器：preHandle 并发执行，字段若记录"上次请求"即有可见性问题
+     *   4) 序列化：HttpMessageConverter 是单例无状态，ObjectMapper
+     *      配置后线程安全（如 Jackson 的 SerializerCache 并发安全）
+     *   5) 控制器字段：最常见的盲区，见 HelloController 注释块第二节
+     *   6) 业务线程切换：Controller -> Service 若引入 @Async/@Transactional
+     *      的组合，ThreadLocal 传播链路成为最大不确定点
      *
-     * 三、@WithMockUser 与 SecurityContext 的模拟
-     *   1) 未认证访问 /api/users/1 -> 401/重定向登录（本测试中通过 Security Filter 拦截）
-     *   2) @WithMockUser(username=admin, roles=ADMIN)
-     *      -> WithMockUserSecurityContextFactory 构造 SecurityContext
-     *      -> SecurityContextHolder.setContext(...) 设置当前线程
-     *      -> SecurityFilter 链识别已认证用户 -> 放行
-     *   3) @WithMockUser 是登录态的最简模拟，不需要走表单登录流程
-     *   4) 更复杂场景可用 @WithUserDetails + UserDetailsService 真实带角色加载
+     * 三、本类测试方法在做什么线程相关动作
+     *   1) 给定：@MockBean service 返回预置值（单线程 stub，无竞争）
+     *   2) 执行：mockMvc.perform(...) 一次请求（单线程 -> 无竞争）
+     *   3) 断言：andExpect 检查响应体与状态码（同一主线程，结果已固化）
+     *   4) 结论：本类主要为"契约测试"，并发风险不在此层暴露；
+     *      真竞态点在 Service 层缓存与数据库唯一约束（UserService 块）
      *
-     * 四、Security 测试的注意事项
-     *   - 跨上下文持有：@WithMockUser 默认在主线程有效，
-     *     如测试里发异步子线程请求需要手动传递 SecurityContext
-     *   - 过滤器链验证：本测试通过 SecurityRequestPostProcessors 可以用
-     *     user(admin).password(admin) 直接模拟表单登录后流程
-     *   - 授权测试的粒度：role/admin/perm 三层粒度选择应与实际权限模型一致
+     * 四、并发测试的移植建议
+     *   1) 竞态场景用 @SpringBootTest + 真实线程池编排：
+     *      注入实际的 TaskExecutor（与生产同款配置）而非测试专用池
+     *   2) 断言辅助：awaitility 库 (await().atMost(5, SECONDS).until(...))
+     *      处理异步完成的轮询，避免 sleep 硬编码
+     *   3) 边界值化：并发线程数覆盖 1、中值、连接池上限、池上限+1，
+     *      尤其"上限+1"能抓到池耗尽的显式异常路径
+     *   4) 失败重跑机制：并发测试偶发失败，CI 设置 retry 一次并标记
+     *      @Tag("flaky-race")_观察趋势，警惕"重跑即绿"掩盖真问题
+     *   5) 监控指标接入：把压测数据回投 Micrometer 埋点，
+     *      吞吐/线程池水位与 RT 一起看才能定位是业务瓶颈还是排队瓶颈
      *
-     * 五、请求构造器体系与常见参数类型测试
-     *   1) RequestBuilder 家族：get/post/put/delete + .param/.header/.content/.accept
-     *   2) JSON 场景必须 .contentType(MediaType.APPLICATION_JSON)，缺失会返回 415
-     *   3) 多值参数：.params(MultiValueMap) 模拟复选框/批量 ID
-     *   4) 文件上传：multipart(file).file(new MockMultipartFile(...))
-     *   5) PathVariable：get(/api/users/1) 直接拼 URL，框架自动匹配注册映射
-     *   6) 分页参数：.param(page,0).param(size,20)，
-     *      Spring Data 的 PageableHandlerMethodArgumentResolver 自动解析
-     *   7) 断言次序：先 status -> header -> jsonPath，由粗到细
-     *
-     * 六、分页与排序参数的端到端测试要点
-     *   1) .param(page, 0).param(size, 10) 覆盖默认分页分支
-     *   2) .param(sort, username,desc) 验证排序参数被 Pageable 正确解析
-     *   3) 越界页码：Spring Data 默认返回空页而非异常，
-     *      断言 getContent() 为空且 totalPages 正常即可
-     *   4) 分页响应体字段约定：content/number/size/totalElements，
-     *      MockMvc + jsonPath 可逐字段断言，守住分页契约
+     * 五、Beyond 框架：并发测试的能到多深
+     *   1) 协议级：单线程结果一致可验证"幂等性与线程无关"的逻辑；
+     *      真正的幂等需跨线程重复提交同一请求（同 requestId）
+     *   2) 隔离级别级：@Transactional(readOnly=false) 并发测试需配合
+     *      TransactionTemplate 或编程式事务制造明确的提交时机
+     *   3) 系统级：超过应用层后进入数据库行锁、MVCC 行为的验证范围，
+     *      这类用集成测试 + 真实数据库（Testcontainers）才可信
      * =========================================================================
      */
 }

@@ -194,61 +194,56 @@ class UserServiceTest {
 
     /*
      * =========================================================================
-     * 【Spring 内幕】Mockito 扩展点与 Spring 集成的测试内幕（非可执行代码）
+     * 【Java 并发】纯 Mockito 单测的线程视角、时间控制在竞态验证中的角色（非可执行代码）
      * =========================================================================
      *
-     * 一、本测试类为什么不需要启动 Spring 容器
-     *   1) 本类用 @ExtendWith(MockitoExtension.class)（JUnit 5 扩展）
-     *      非 SpringExtension -> 无 ApplicationContext，每个测试毫秒级
-     *   2) @Mock UserRepository -> Mockito 生成代理（拦截全部方法）
-     *   3) @InjectMocks UserService -> 按构造器/字段/setter 顺序注入 mock，
-     *      直接得到一个只依赖 mock 的真实 Service 对象
-     *   4) 局限：缓存/事务/AOP 全部失效（因为没走 Spring 代理）
-     *      -> 本类方法上的 @Cacheable 不会触发，直接进入方法体
-     *      -> 这也是为什么本测试特别需要验证缓存未命中时的业务逻辑
+     * 一、本类测试的线程模型
+     *   1) 本类不拉起 Spring 容器 -> 只有测试主线程，无后台线程，
+     *      每个 @Test 方法串行执行，毫秒级返回
+     *   2) @Mock/@InjectMocks 生成的代理只涉及字节码增强（CGLIB/Mockito
+     *      ByteBuddy），不存在线程池、锁、ThreadLocal 传播的概念
+     *   3) 推论：本类覆盖的是"业务逻辑正确性"，与并发风险正交；
+     *      缓存的 @Cachable 生效行为、事务回滚、SecurityContext 传播
+     *      都不在本类测试范围，需上层集成测试补位
      *
-     * 二、Mockito 的核心 API 在做什么
-     *   - when(userRepository.findById(1L)).thenReturn(Optional.of(user))：
-     *     注册匹配条件（存入 SourceLocator），下次方法调用拦截到匹配条件
-     *     就返回预置值，跳过真实实现
-     *   - ArgumentMatchers.any()/eq(...)：放宽或精确匹配参数
-     *   - verify(userRepository, times(1)).findById(1L)：记录并断言调用次数
-     *   - thenThrow：模拟异常分支（验证异常映射 404 的逻辑）
+     * 二、Mockito 在多线程下的限制（若强行添加并发断言）
+     *   1) Mockito 的 stub 验证器不是为并发设计：同一 mock 的
+     *      when().thenReturn() 配置是共享注册表，多线程同时配置会互相覆盖
+     *   2) verify(times(n)) 的计数器虽是原子的（AtomicInteger），
+     *      但"恰好在某 verify 时别的线程正调用"时序不定 -> flaky
+     *   3) 官方建议：mock 配置在测试启动时定死、调用期间不动，
+     *      断言区域再读计数；需要验证竞态正确性请改用真实现而非 mock
      *
-     * 三、与 Spring 环境的对比：什么时候该切回集成测试
-     *   - 纯逻辑测试（如本类）：MockitoExtension 足够，快、稳、无 IO
-     *   - 集成测试（缓存生效、事务行为）：需要 @SpringBootTest/@DataJpaTest
-     *     并验证框架层行为（如缓存的 key 策略实际是怎样的）
-     *   - 混合策略：缓存 key 生效性单独用 @SpringBootTest 写 1-2 个集成用例，
-     *     剩余逻辑用纯 Mockito 快速覆盖
+     * 三、时钟与时序控制的边界
+     *   1) 本类若涉及时间（createdAt），LocalDateTime.now() 只要在主线程
+     *      同步调用就确定（不含时区/并发问题）
+     *   2) 想控制时间做"过期/计时"逻辑测试：
+     *      - 注入 Clock Bean（生产 code 调 clock.instant()），测试里
+     *        用 Clock.fixed(...) 便无需修改代码结构
+     *      - 不要在生产代码里散落 LocalDateTime.now()，否则时间不可注入
+     *   3) 异步测试的等待：本类是同步方法，无需等待；一旦给 Service
+     *      加 @Async 返回 CompletableFuture，单测必须用 timeout +
+     *      join 显式等待，否则测试方法早于 future 完成而断言通过假绿
      *
-     * 四、测试可维护性要点
-     *   - given/when/then 结构：本类用注释分区，降低阅读成本
-     *   - 不写无意义断言（assertThat(x).isNotNull() 只证明方法没炸）
-     *   - verify 慎用：过度 verify 会把测试绑死实现细节，重构前得改大量测试
-     *   - IDE 快捷生成 mock，但别盲目依赖 -- 测试质量取决于断言设计
+     * 四、竞态与契约在单测中的分别处理
+     *   1) 单测回答"给定输入是否产出预期输出"（契约）
+     *   2) 集成测试回答"多线程同时操作时结果是否仍符合预期"（竞态）
+     *   3) 两层测试工具/范围清晰分层才能快速反馈：
+     *      - 单测毫秒级、随时跑
+     *      - 并发测试秒级、CI 夜间跑 + 上线前跑
+     *   4) 对本 Service 的高价值竞态用例：createUser 在 N 个线程同时
+     *      提交相同 username，断言仅一条成功（数据库唯一约束兜底）
+     *      与 getOrCreate 语义的"恰好一次创建"
      *
-     * 五、AssertJ 常用断言速查
-     *   1) assertThatThrownBy(() -> service.getUserById(99L))
-     *      .isInstanceOf(ResourceNotFoundException.class)
-     *      .hasMessageContaining(用户不存在)
-     *   2) assertThat(page.getContent()).extracting(UserDto::getUsername)
-     *      .containsExactly(alice, bob)
-     *   3) assertThat(dto).usingRecursiveComparison()
-     *      .ignoringFields(createdAt).isEqualTo(expected)——DTO 整体比对利器
-     *   4) verify 配合 ArgumentCaptor：捕获下层传入参数并断言其内容，
-     *      而非只断言调用次数
-     *   5) 测试间隔离：不依赖执行顺序，每个用例独立构造 given 数据
-     *   6) @Nested 分组 given/when/then 分支，JUnit 5 原生支持，可读性更好
-     *
-     * 六、Mockito 时序与状态验证的选择
-     *   1) verify 只验证交互（被调用与否），不验证状态正确性
-     *   2) 断言返回值才是主断言，verify 只做辅助边界检查
-     *   3) InOrder 验证调用次序：inOrder(repo).verify(findAll).verify(save)
-     *      谨慎使用，次序通常属于实现细节而非契约
-     *   4) mock 静态方法需 mockito-inline（MockedStatic），
-     *      静态工具类调用是测试泥潭，能重构为注入实例就重构
-     *   5) 本类验证思路：先断言业务结果（DTO 内容），再抽查唯一性检查次数
+     * 五、并发测试之外的静态防线
+     *   1) 代码审查清单：Service/Controller 字段是否可变、是否有
+     *      ThreadLocal 未清、非线程安全集合是否逃逸到单例字段
+     *   2) 静态分析工具：SpotBugs/FindSecBugs 检测常见并发反模式
+     *      （如 LazyInit 非同步、Double-checked 无 volatile）
+     *   3) 运行期观测：Micrometer 上报线程池 active/idle/queue，
+     *      异常的线程池水位本身就是并发设计问题的先行信号
+     *   4) 所有静态手段都不能替代"并发场景下真实执行"的检验，
+     *      本类现阶段的快速反馈 + 集成层的真实执行是最小完备的组合
      * =========================================================================
      */
 }

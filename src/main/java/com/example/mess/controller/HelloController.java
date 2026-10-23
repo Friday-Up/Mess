@@ -129,53 +129,53 @@ public class HelloController {
 
     /*
      * =========================================================================
-     * 【Spring 内幕】从 Tomcat NIO 到 Handler：监听、分发与过滤器链（非可执行代码）
+     * 【Java 并发】Tomcat 线程模型、Servlet 线程安全与 ThreadLocal 清理（非可执行代码）
      * =========================================================================
      *
-     * 一、一次 /hello?name=Spring 请求的网络与线程模型（内嵌 Tomcat 10）
-     *   1) Acceptor 线程（1 个）：ServerSocket.accept() 接收 TCP 连接
-     *   2) Poller 线程（默认 1-2 个）：基于 NIO Selector 监听 OP_READ 就绪事件，
-     *      就绪后包装为 NioChannel 投递到 Executor 线程池
-     *   3) Executor 线程池（默认 maxThreads=200，minSpareThreads=10）：
-     *      负责实际解析 HTTP 头、读取 Request 体并执行 Servlet 调用链
-     *   4) 本类 hello() 方法运行在 Executor 线程中，返回字符串后等响应
-     *      写出完成线程才回池
-     *   可见一个简单 Hello 也要经过：TCP -> NIO -> HTTP 解析 -> Filter 链
-     *   -> DispatcherServlet -> HandlerAdapter -> 方法，共 6 层
+     * 一、内嵌 Tomcat 的线程分工（请求一进一出谁在干活）
+     *   1) Acceptor 线程（1 个，ServerSocket.accept 阻塞循环）：
+     *      只负责收 TCP 连接，把 NioChannel 注册给 Poller，绝不做业务
+     *      经验：连接洪水攻击时此线程最先排队，但业务 CPU 不高
+     *   2) Poller 线程（默认 1-2 个，基于 NIO Selector）：
+     *      监听 OP_READ 就绪，把就绪通道包装成任务交给 Executor
+     *   3) Executor 工作线程（默认池 maxThreads=200，minSpare=10，namePrefix=pool-N）：
+     *      解析 HTTP 报文 -> 走 Filter 链 -> 进 DispatcherServlet -> 执行本类
+     *      hello() 方法 -> 写响应 -> 线程回池
+     *   4) 线程回池的含义：池化线程体（PooledThreadRunnable）被复用，
+     *      但 ThreadLocal 不会被容器清除 -> 这是脏数据的主要来源
      *
-     * 二、Filter 过滤器链的执行顺序与 DelegatingFilterProxy 桥接
-     *   Spring Security 注册的是一个 FilterChainProxy（由 springFilterChain 提供）：
-     *   - 它本质是 jakarta.servlet.Filter，注册到 ServletContext 时通过
-     *     DelegatingFilterProxy 包装 -> 代理 BeanFactory 中的 springSecurityFilterChain
-     *   - 请求进入 FilterChainProxy 后按 SecurityFilterChain 列表匹配：
-     *     本项目只注册了一条链，链上默认约 12-16 个 Filter（顺序敏感）：
-     *     DisableEncodeUrlFilter -> ForceEagerSessionCreationFilter ->
-     *     ChannelProcessingFilter -> WebAsyncManagerIntegrationFilter ->
-     *     SecurityContextHolderFilter -> HeaderWriterFilter -> CsrfFilter ->
-     *     LogoutFilter -> UsernamePasswordAuthenticationFilter ->
-     *     RequestCacheAwareFilter -> SecurityContextHolderAwareRequestFilter ->
-     *     AnonymousAuthenticationFilter -> SessionManagementFilter ->
-     *     ExceptionTranslationFilter -> AuthorizationFilter
-     *   - 本类 /hello/** 被 permitAll()，授权过滤器直接放行
-     *   - 若访问 /api/users/** 则 AuthorizationManager.decide() 检查当前
-     *     SecurityContext 中的 Authentication 是否已认证（表单登录）
+     * 二、Controller 的线程安全基线
+     *   1) 本类只持有一个 final 依赖（UserService 注入）与无状态方法：
+     *      天然线程安全，多个 Tomcat 线程可同时进入 hello() 互不干扰
+     *   2) 何时会出问题？向本类加了共享可变字段：
+     *      private int hitCount;  // 两个请求线程同时 hitCount++ 会丢更新
+     *   3) 线程安全的修法按场景：
+     *      - 计数：AtomicInteger 或 LongAdder（高并发更优）
+     *      - 收集结果：ConcurrentHashMap / CopyOnWriteArrayList
+     *      - 复合判断：synchronized 块或 ReentrantLock（见 UserService 块）
+     *   4) 方法内的局部变量：每个线程有独立栈帧，局部引用绝无共享，
+     *      写业务逻辑应尽量把状态压到方法局部，缩小共享面
      *
-     * 三、SecurityContext 的线程绑定与跨线程传播风险
-     *   - SecurityContextHolderStrategy（默认 ThreadLocal 模式）：用户身份
-     *     存储在当前线程的 ThreadLocal，过滤器读取后放入 Request
-     *   - 若在本类方法内开启 @Async 子线程，子线程默认看不到安全上下文，
-     *     需配置 DelegatingSecurityContextRunnable（WebAsyncManagerIntegrationFilter）
-     *   - WebFlux/Reactor 场景则使用 ReactorContext 模式替代 ThreadLocal
+     * 三、ThreadLocal 的使用与污染排查
+     *   1) 常见用途：MDC 日志链路 ID、用户上下文、DB 连接绑定（JDBC），
+     *      Spring 事务管理器正是用 ThreadLocal 把连接绑到当前线程
+     *   2) Tomcat 线程池复用线程：上一次请求设置的 ThreadLocal 值
+     *      若不 remove，会被下一次请求读到 -> 脏数据、权限串号
+     *   3) 正确模式（finally 清理不可省）：
+     *      try { CONTEXT.set(user); doWork(); } finally { CONTEXT.remove(); }
+     *   4) 排查手段：压测压出"偶现串号"问题，先翻 ThreadLocal 使用点，
+     *      再用 jstack 看工作线程栈里残留的 Filter/Interceptor；线上用
+     *      arthas thread -b 或 ThreadLocal 网关埋点做脏数据拦截
      *
-     * 四、健康检查的框架层实现与最佳实践
-     *   1) Spring Boot Actuator 的 /actuator/health 是 framework-level 实现：
-     *      内置 HealthIndicator（db/diskSpace/redis/discoveryClient）自动探测，
-     *      StatusAggregator 聚合为 UP/DOWN/UNKNOWN
-     *   2) 与 K8s 探针对接（ManagementProbesHealthContributorHandlerMapping）：
-     *      liveness 只看应用自身，失败重启 Pod；readiness 额外检查外部依赖，
-     *      失败摘除流量（management.endpoint.health.probes.enabled=true）
-     *   3) 本类 /hello 作为最小健康检查的适用场景：验证路由+序列化+响应
-     *      全链路且无重外部依赖；大流量场景注意限流，避免与业务 API 竞争线程
+     * 四、同步与异步 Servlet 的界限
+     *   1) 传统 Servlet（本类）：一个请求占一个工作线程直到响应写出
+     *   2) 异步 Servlet（startAsync + DeferredResult）：Release 工作线程，
+     *      业务线程完成后回调写响应，适合长耗时外部调用
+     *   3) Spring MVC 的 @Async 返回值机制（DeferredResult/Callable/SseEmitter）
+     *      底层即异步 Servlet，但并不自动换线程池，需自定义 TaskExecutor
+     *   4) 判断准则：CPU 密集任务别异步（线程切换反而更慢）；
+     *      IO 密集任务（远程调用、写文件）才值得释放 Tomcat 线程
+     *   5) /hello 这类零依赖接口应保持同步，异步化反而增加状态机复杂度
      * =========================================================================
      */
 }

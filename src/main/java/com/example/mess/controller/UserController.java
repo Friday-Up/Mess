@@ -173,77 +173,57 @@ public class UserController {
 
     /*
      * =========================================================================
-     * 【Spring 内幕】DispatcherServlet 请求处理流水线与 HandlerAdapter 机制（非可执行代码）
+     * 【Java 并发】控制层并发画像：从请求线程到响应线程的全链路（非可执行代码）
      * =========================================================================
      *
-     * 一、一个 GET /api/users/1 请求在 DispatcherServlet.doDispatch 的流转
-     *   Tomcat 接收连接 -> 构造 RequestFacade -> 匹配 Filter 链（见 SecurityConfig）
-     *   -> 进入 DispatcherServlet（本质是一个 Servlet）：
-     *   1) getHandler(mappedRequest)：遍历已注册的 HandlerMapping 列表
-     *      - 已注册（Boot Servlet 项目共约 8 个）：
-     *        RequestMappingHandlerMapping（处理 @RequestMapping）
-     *        BeanNameUrlHandlerMapping、RouterFunctionMapping 等
-     *      - 本类所有 @GetMapping 等注解在启动时由
-     *        RequestMappingHandlerMapping.afterPropertiesSet() 扫描注册进
-     *        urlLookup 表（key = /api/users/{id}, value = HandlerMethod）
-     *   2) getHandlerAdapter(handler)：返回 RequestMappingHandlerAdapter
-     *   3) handler.handle()：反射调用本类方法，内部先执行拦截器链 preHandle
-     *   4) 参数绑定：HandlerMethodArgumentResolverComposite 决定每个参数的来源
-     *      本类典型解析器：
-     *      - @PathVariable Long id -> PathVariableMethodArgumentResolver
-     *      - @RequestBody UserDto dto -> RequestResponseBodyMethodProcessor
-     *      - Pageable pageable -> PageableHandlerMethodArgumentResolver（Spring Data）
-     *      - @RequestParam String name -> RequestParamMethodArgumentResolver
-     *   5) 返回值处理：HandlerMethodReturnValueHandlerComposite
-     *      返回 ApiResponse<UserDto> 且有 @ResponseBody
-     *      -> RequestResponseBodyMethodProcessor 接管
-     *      -> MessageConverter 协商写出响应体（详见 ApiResponse 注释块）
-     *   6) 异常分支：任何阶段抛异常 -> DispatcherServlet.processDispatchResult
-     *      -> HandlerExceptionResolver 链（详见 GlobalExceptionHandler 注释块）
-     *   7) finally：afterCompletion 回调（事务提交后、响应已写出）
+     * 一、一次 GET /api/users/1 牵涉到哪些线程
+     *   1) Tomcat 工作线程（Thread-1）：全程贯穿
+     *      HandlerMapping 匹配 -> HandlerAdapter 调用本类方法 -> Service ->
+     *      Repository -> JdbcTemplate/Hibernate -> DB IO（阻塞同步等待）
+     *   2) HikariCP 连接池的借用线程：工作线程从池里 acquire 连接，
+     *      借用期间工作线程阻塞（不是 Hikari 的线程在执行业务 SQL），
+     *      连接池线程只负责建连接与清理空闲连接
+     *   3) MySQL 驱动的 IO 线程：请求发出后工作线程在 socket 上 read 阻塞，
+     *      直到驱动收完结果集才被唤醒
+     *   4) 结论：串行链路把 200 个工作线程按"下游延迟"成倍放大：
+     *      DB 平均 200ms，每线程 5 QPS，200 线程理论上限 1000 QPS
+     *      （任何一层 RT 抖动都会让工作线程成批阻塞，崩点是超时无响应）
      *
-     * 二、HandlerMethod 与执行框架：为什么方法能被描述出来
-     *   启动时 @RequestMapping 被封装成 HandlerMethod 对象：
-     *   - bean（String）：bean 名称（userController）
-     *   - method：java.lang.reflect.Method 引用
-     *   - parameters：MethodParameter 数组，记录参数索引/嵌套层级/参数注解
-     *   执行时真正调用的是 InvocableHandlerMethod.invokeForRequest()，
-     *   用反射 Method.invoke(bean, argsComplete) 完成调用
-     *   性能备注：Spring 对反射调用做了两层优化：
-     *   - MethodParameter 缓存 ArgumentResolver 绑定结果，避免每次匹配
-     *   - 可选的参数预解析（部分版本），减少 map 查找
+     * 二、控制层共享状态的边界
+     *   1) 本类只装配了 Service 与 DTO 转换的入参，全部无状态 -> 安全
+     *   2) 常见越界行为与后果：
+     *      - 在方法外 new SimpleDateFmt 作为字段：SimpleDateFmt 非线程安全，
+     *        格式化结果错乱甚至抛异常；改用 DateTimeFormatter（不可变）
+     *      - 用 ArrayList 做入参收集并缓存到字段：可见性与覆盖问题
+     *   3) 请求级缓存可用 @Scope(WebApplicationContext.SCOPE_REQUEST) 的 Bean，
+     *      Spring 为每个请求新建实例，结束即销毁，无thread 竞争
+     *   4) 会话级数据用 @Scope(SCOPE_SESSION)；跨请求共享才落到单例 +
+     *      并发容器或显式同步
      *
-     * 三、为什么 Controller 不应该写业务逻辑（框架视角）
-     *   HandlerAdapter 是一次性入口：请求线程万一阻塞在业务代码中的
-     *   远程调用或锁等待，会占满 Tomcat 线程池（默认 200 线程），
-     *   导致健康检查也超时（/hello 放行路径同样无响应）
-     *   因此最佳实践是 Controller 只做协议转换与参数校验，
-     *   同步耗时逻辑下沉到 @Async 或消息驱动处理，保持线程快速回笼
+     * 三、ThreadLocal 在请求链路中的真实落点
+     *   1) Spring 的事务管理：TransactionSynchronizationManager 用多个
+     *      ThreadLocal（connectionHolder/isReadOnly/name）绑定数据库连接
+     *   2) Security 上下文：SecurityContextHolderStrategy 的 ThreadLocal
+     *      携带 Authentication（见 SecurityConfig 注释块）
+     *   3) MDC 链路追踪：Logback 的 MDC Map 是 ThreadLocal，基于
+     *      traceId 串联日志（本类 logにも自动注入？需配置 layout）
+     *   4) 三者都可能因线程复用泄漏：
+     *      - 事务：TransactionInterceptor 在 finally 里清理，安全
+     *      - Security：SecurityContextHolderFilter 请求结束清理，安全
+     *      - MDC：需要自己在 Filter/Interceptor 里 clear，任何一处漏掉
+     *        就会在压测中看到"上一次请求的 traceId 跑到下次"，经典脏数据
      *
-     * 四、异步请求处理与线程模型
-     *   1) DeferredResult<ResponseEntity>：容器线程立即释放，业务线程完成后
-     *      setResult，由 DispatcherServlet 回调写出响应，适合远程调用场景
-     *   2) CompletableFuture：组合多个远程调用非阻塞合并，@Async 自动桥接
-     *   3) SseEmitter：一个连接多次写出，适合服务端实时推送
-     *   4) WebFlux 的 Mono/Flux 需要整体切换响应式容器，与本项目 Servlet 栈不兼容
-     *   5) DeferredResult.onTimeout 务必注册兜底响应，否则容器会响应空体或 503
-     *   6) 同步与异步谨慎混用：同一应用内并存会让事务边界更难推理
-     *
-     * 五、HandlerInterceptor 的注册与执行点（MVC 拦截器原理）
-     *   1) 与 Filter 的区别：Interceptor 在 DispatcherServlet 内部、
-     *      只对进入 HandlerMapping 的请求生效；Filter 在 Servlet 之前、
-     *      对所有请求（含静态资源）生效
-     *   2) 三个回调点：
-     *      - preHandle：Handler 执行前（事务开始前），可短路返回 false
-     *      - postHandle：Handler 返回后、视图渲染前（异常时走 afterCompletion 而非此）
-     *      - afterCompletion：视图渲染后（finally 语义），适合清理 ThreadLocal
-     *   3) 注册方式：实现 WebMvcConfigurer.addInterceptors，
-     *      通过 InterceptorRegistry 指定 order 与 pathPatterns
-     *   4) 典型用途：登录态校验、请求日志埋点、接口耗时统计、
-     *      操作审计（写审计表）、防重复提交标记
-     *   5) 陷阱：preHandle 里抛异常会被全局异常处理器接到，
-     *      但 postHandle 里的异常不会（已过异常解析点），
-     *      故业务校验别放在 postHandle
+     * 四、控制层压测与并发的自检清单
+     *   1) 并发线程数应 <= maxThreads+acceptCount，否则压测先压 Tomcat 排队
+     *      （排队带来的 RT 上升会掩盖业务瓶颈）
+     *   2) 观察工作线程池水位：jvisualvm 或 /actuator/metrics/tomcat.threads.busy
+     *      busy 接近 max 时先看下游（DB/第三方）耗时，而不是加线程
+     *   3) 切换点：CPU 飙高但 DB 慢查询少，通常是序列化/正则/大对象拷贝，
+     *      异步化并不能救，先做 CPU profile（async-profiler 生成火焰图）
+     *   4) 接口幂等性：并发重试会触发两次创建 -> 详见 UserService 唯一性
+     *      检查与数据库唯一约束的双保险设计
+     *   5) 超时兜底：Tomcat 的 connectionTimeout 与下游客户端超时应
+     *      层层递减（Tomcat > Service > Remote Client），形成漏斗
      * =========================================================================
      */
 }

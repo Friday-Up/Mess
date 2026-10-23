@@ -217,78 +217,64 @@ public class UserService {
 
     /*
      * =========================================================================
-     * 【Spring 内幕】AOP 代理原理、this 调用失效与事务传播行为（非可执行代码）
+     * 【Java 并发】服务层并发画像：ThreadLocal、缓存击穿与竞态修正（非可执行代码）
      * =========================================================================
      *
-     * 一、@Service 的 UserService Bean 其实是一个代理对象
-     *   本类被 @Cacheable/@CacheEvict 修饰 -> Spring 为其生成 AOP 代理：
-     *   - 代理类型选择：有实现接口且未强制 CGLIB -> JDK 动态代理；否则 CGLIB
-     *     本类未实现接口 -> 使用 CGLIB（生成 UserService$$EnhancerBySpringCGLIB 子类）
-     *   - 容器中 beanName=userService 指向代理对象，而非真实目标对象
-     *   - 注入到 UserController 的也是代理对象
-     *   代理调用链（简化）：caller -> proxy.getUserById(id)
-     *   -> CacheInterceptor.invoke() -> 判断 CacheManager 是否命中
-     *   -> 未命中则 proceed() 反射进入目标方法 -> 结果写入缓存后返回
-     *   这就是 @Cacheable 在不改动本类代码的前提下生效的原因
+     * 一、本 Bean 的并发模型（单例 + 无字段状态 -> 基线安全）
+     *   1) 单例 UserService 在容器内只有一份实例，被所有请求线程共用
+     *   2) 本类只持有注入的 UserRepository（也是线程安全的 Bean），
+     *      方法内部变量全在调用线程栈上 -> 没有共享可变状态 -> 天然安全
+     *   3) 破坏因素：日后若加缓存字段 private Map<Long, User> memoMap = new HashMap<>();
+     *      多线程同时 put 会触发 HashMap 扩容死循环（JDK8 改为尾插虽不死循环但丢数据）
+     *      -> 必须换 ConcurrentHashMap 或显式 synchronized（下面展开）
      *
-     * 二、this 调用失效：AOP 最常见的不生效陷阱
-     *   假设在本类新增一个内部方法：
-     *   public void warmup(Long id) { this.getUserById(id); }
-     *   此时 this.getUserById() 直接进入目标对象的方法，绕过了代理对象：
-     *   - 因为 this 是目标对象本身，不是代理对象
-     *   - CacheInterceptor 没有被织入，@Cacheable 不会触发
-     *   解决方案：
-     *   1) 注入自身代理：@Autowired private UserService self; self.getUserById(...)
-     *   2) 从容器获取：applicationContext.getBean(UserService.class)
-     *   3) AopContext.currentProxy() + 启用 exposeProxy=true（编程式）
-     *   4) 结构上避免内部互调（推荐：让 warmup 也放在外层）
-     *   同样的问题存在于 @Transactional / @Async / @Retryable 等所有
-     *   基于 AOP 的注解 -> 只有外部进来的调用才会走代理通知
+     * 二、JMM 与可见性：为什么"看似正确"却读不到新值
+     *   1) Java 内存模型：每个线程有自己的工作内存（寄存器/缓存副本），
+     *      不强制立即回写主存，也不强制立即感知他人写入 -> 可见性问题
+     *   2) 常见症状：一个线程改了 flag，另一个线程的死循环不退出
+     *   3) 保证可见性的四种手段：
+     *      - volatile：读强制刷主存，写强制回主存；但复合操作（i++）不原子
+     *      - synchronized：进入与退出块建立 happens-before 链
+     *      - final：构造期语义保证，正确构造的不可变对象对所有线程可见
+     *        （本项目的 DTO 即此模式，见 UserDto 注释块）
+     *      - 原子类：AtomicInteger.getCasAdd 保证原子且可见
+     *   4) 本类业务里需要关心可见性的点：缓存管理器内部用 ConcurrentHashMap
+     *      已处理（Spring Cache 实现保证），业务代码不必再double-check
      *
-     * 三、JDK 动态代理 vs CGLIB 代理的对比要点
-     *   - JDK Proxy：基于接口，生成 com.sun.proxy.$ProxyNN 类，调用时
-     *     反射进 InvocationHandler（AopProxy 的拦截链）
-     *   - CGLIB：生成子类，重写非 final 方法，调用 MethodProxy.invokeSuper
-     *   - CGLIB 约束：final 方法无法代理（静默不生效）；
-     *     构造器会被调用一次（代理子类实例化），注意不要在构造器里依赖注入字段
-     *   - Spring 5+：CGLIB 使用 ClassLoader 缓存代理类，避免重复生成字节码
+     * 三、缓存击穿、穿透与并发回源
+     *   1) @Cacheable 的缺陷场景：某热点用户 ID 过期瞬间，100 个线程同时
+     *      miss -> 100 次 DB 查询（缓存击穿）
+     *   2) 修法一：@Cacheable(sync=true)，本地缓存（ConcurrentMapCache）
+     *      时 synchronized 锁同一 key 串行回源；Redis 缓存时只能限一个
+     *      应用实例进入，分布式场景不达标
+     *   3) 修法二：分布式互斥（Redis SETNX 或 Redisson lock），同一 key
+     *      只允许一个线程回源，其它等通知或短暂自旋
+     *   4) 修法三：逻辑过期（缓存永不过期，value 内含过期字段），
+     *      发现过期后由异步线程刷新，请求拿到旧值先返回，无阻塞
+     *   5) 雪崩防护：缓存键添加随机 TTL 抖动（如 60s + rand(10s)），
+     *      避免同一时刻大批 key 同时失效
+     *   6) 穿透防护：null 也缓存（短 TTL）或布隆过滤器前置拦截非法 ID
      *
-     * 四、事务传播行为：@Transactional 的传播级别
-     *   若本类方法添加 @Transactional，传播行为的关键场景：
-     *   - REQUIRED（默认）：加入现有事务，没有则新建
-     *   - REQUIRES_NEW：总是挂起当前并新建独立事务（外层回滚不影响本事务）
-     *   - NESTED：基于保存点的部分回滚（依赖 JDBC SAVEPOINT）
-     *   - MANDATORY/SUPPORTS/NOT_SUPPORTED/NEVER：语义分别要求或排除事务
-     *   注意：@Transactional 也是 AOP 实现，内部 this 调用同样不生效；
-     *   且默认只对 public 方法代理，受检异常默认不回滚（需 rollbackFor 配置）
+     * 四、唯一性检查的并发时序（竞态与双保险）
+     *   1) 本类 createUser 的逻辑：existsByUsername 检查 -> save
+     *   2) 并发时序：线程 A 检查不存在，线程 B 同时检查也不存在，
+     *      两者先后 save 都通过应用层检查 -> 靠数据库唯一索引兜底
+     *   3) 数据库唯一约束在此是"次要防线"，应用层提前拦截是"主要防线"：
+     *      - 只有应用层：竞态时产生脏数据（唯一性被破坏）
+     *      - 只有数据库层：每次插入失败都浪费连接与异常栈开销
+     *      双保险的正确姿势：应用层先挡 -- 失败回 409（而非 500）
+     *   4) 更高要求可用 SELECT ... FOR UPDATE 悲观锁或 advisory lock 串行化
+     *      创建动作（注意事务边界，锁随事务释放）
      *
-     * 五、循环依赖与三级缓存：为什么字段注入可能形成环
-     *   1) 循环依赖链：UserService -> UserController -> UserService 相互注入
-     *   2) 单例对象流的三个缓存（singletonObjects / earlySingletonObjects /
-     *      singletonFactories）协作：A 先实例化但未填充属性，提前暴露的
-     *      ObjectFactory 放入三级缓存；B 装配时拿到 A 的早期引用并完成实例化；
-     *      A 继续填充时从已就绪的 B 获得属性，完成闭环
-     *   3) 三级缓存存在的核心动机是 AOP：早期引用若需要代理，Factory 会先
-     *      生成代理对象（SmartInstantiationAwareBeanPostProcessor）
-     *   4) 构造器循环依赖无解 -> 直接异常，只能用 @Lazy 打断
-     *   5) 最佳实践：依赖图保持树状，配置类用 @Bean 显式表达创建顺序
-     *
-     * 六、@EnableCaching 底层与 CacheInterceptor 细节
-     *   1) @EnableCaching 引入 @Import(CachingConfigurationSelector)，
-     *      注册 InfrastructureAdvisorPostProcessor 与 CacheInterceptor
-     *   2) CacheInterceptor extends CacheAspectSupport：
-     *      a. generateKey：SpEL 解析 key 表达式（本类 allUsers-页-尺寸）
-     *      b. lookup: CacheResolver 找到缓存名 users 对应的 Cache 实现
-     *         （SimpleCacheManager 的 ConcurrentMapCache / RedisCache）
-     *      c. miss -> invoke 真实方法 -> put 结果
-     *      d. hit -> 直接返回缓存值（跳过方法体）
-     *   3) 多线程下的缓存一致性：
-     *      - @Cacheable 在并发 miss 时可能多次回源（缓存击穿），
-     *        可用 sync=true 让同一 key 串行回源（底层 putIfAbsent）
-     *      - 写后失效的窗口期：@CacheEvict 与 DB 写入非原子，
-     *        严格一致场景需用 Redis 分布式锁或延迟双删
-     *   4) 序列化注意：切换 Redis 缓存时，Page<UserDto> 需可序列化
-     *      （GenericJackson2JsonRedisSerializer 保留类型信息最省心）
+     * 五、@Async 与 CompletableFuture 的正确打开方式
+     *   1) 本类若把耗时分支异步化：@Async public CompletableFuture<UserDto> ...
+     *      注意：@Async 同样走 AOP 代理，同类内调用不生效（同 @Cacheable）
+     *   2) 接收方使用 .join() 等待时会占用 Tomcat 线程，与同步无差，
+     *      只有把多个异步任务分派后 .allOf 组合再返回，才真正减线程占用
+     *   3) 应对异常：CompletableFuture 的异常不会自动抛到调用方，
+     *      需 .exceptionally 或 .handle 兜底；否则异常被吞，日志只剩 silence
+     *   4) 拒绝策略选择：CallerRunsPolicy 会把任务回灌 Tomcat 线程，
+     *      看似退化但起到背压作用；生产建议 + 指标监控 + 告警
      * =========================================================================
      */
 }

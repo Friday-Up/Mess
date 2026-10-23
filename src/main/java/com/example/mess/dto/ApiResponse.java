@@ -205,62 +205,55 @@ public class ApiResponse<T> {
 
     /*
      * =========================================================================
-     * 【Spring 内幕】HttpMessageConverter 内容协商与消息写出流水线（非可执行代码）
+     * 【Java 并发】响应对象的安全发布、序列化线程安全与伪共享概念（非可执行代码）
      * =========================================================================
      *
-     * 一、本类对象是怎么变成 HTTP 响应 JSON 的（RequestMappingHandlerAdapter）
-     *   1) Controller 方法返回 ApiResponse 后，
-     *      RequestResponseBodyMethodProcessor 接手（识别 @ResponseBody）
-     *   2) chooseProcessor：按返回值类型挑 HttpMessageConverter
-     *      - 默认注册顺序：ByteArrayHttpMessageConverter -> StringHttpMessageConverter
-     *        -> ResourceHttpMessageConverter -> MappingJackson2HttpMessageConverter 等
-     *      - ApiResponse 是对象类型 -> 落到 MappingJackson2HttpMessageConverter
-     *   3) 内容协商（ContentNegotiationManager）决定 ContentType：
-     *      - 请求头 Accept: application/json -> 返回 JSON
-     *      - Accept: ＊/＊ -> 回退到处理器默认（JSON）
-     *      - 客户端支持时也可按 URL 后缀切换（默认关闭后缀协商）
-     *   4) MappingJackson2HttpMessageConverter.write：
-     *      内部委托 ObjectMapper.writeValue(outputStream, this) 序列化
-     *   5) 写出响应体 -> 状态码 200 -> 线程回池
+     * 一、响应对象的线程旅程
+     *   1) 本对象在单次请求的生命期内被三个阶段触碰：
+     *      - Service 返回值构造（工作线程 A）
+     *      - MessageConverter 序列化（仍是工作线程 A，方法栈内）
+     *      - 异步/响应式场景：跨入异步线程后再序列化（线程 A 构造、线程 B 写出）
+     *   2) 异步分支的风险点：若本对象在构造后被另一个线程修改，
+     *      写出线程可能读到中间态 -> 字段前后不一致的响应体
+     *   3) 防御模式：Service 一旦返回 ApiResponse，禁止再修改任何字段
+     *      （把升操作封装到静态工厂内，业务侧拿到的就是"冻结"对象）；
+     *      本类的 success(...) 与 error(...) 静态工厂即遵循此模式
      *
-     * 二、请求体的对称路径（@RequestBody 的反序列化）
-     *   RequestResponseBodyMethodProcessor.readBody：
-     *   1) 取请求 Content-Type（如 application/json）
-     *   2) canRead 返回 true 的第一个 Converter -> Jackson
-     *   3) ObjectMapper.readValue(body, UserDto.class) -> 注入方法参数
-     *   4) 解析失败：HttpMessageNotReadableException（被全局异常处理器转 400）
+     * 二、时间戳与时区的并发陷阱
+     *   1) 本类 timestamp 默认在构造器初始化为 LocalDateTime.now()，
+     *      构造发生在工作线程 -> 写出时已定格，跨线程安全
+     *   2) 陷阱场景：若改为"惰性生成"（getter 内 if null then now()），
+     *      并发 getter 会产生两个不同的时间值，违反语义与可比性
+     *   3) 多线程取时间的性能：LocalDateTime.now() 在 JDK 17 后每次纳秒级，
+     *      无锁竞争，可放心高频调用；老代码用 System.currentTimeMillis
+     *      并发高频调用在部分平台有全局锁影响（现代 JDK 已优化）
+     *   4) 对齐时区：LocalDateTime 不含时区，序列化时使用系统默认时区；
+     *      分布式多区域部署时建议统一存 Instant（UTC）+ 输出时转换
      *
-     * 三、Jackson ObjectMapper 的线程安全与复用
-     *   - 配置一次后是线程安全的（推荐作为单例 Bean）
-     *   - 用户自定义 Bean：@Bean ObjectMapper 进入容器会覆盖默认配置
-     *   - Jackson2ObjectMapperBuilder 支持标准化定制（日期、空值、命名策略）
-     *   本类的 timestamp 序列化为 ISO 字符串即 Spring Boot 默认配置
-     *   （spring.jackson.serialization.write-dates-as-timestamps=false）
+     * 三、泛型字段与类型擦除的并发视角
+     *   1) ApiResponse<T> 的 data 字段类型在运行时擦除为 Object：
+     *      静态工厂传入的实参对象类型与安全性由调用方保证
+     *   2) data 指向的实体可变性决定整体安全性：
+     *      - Date/可变 POJO -> 跨线程存在被修改的可能
+     *      - DTO/record/集合不可变包装 -> 绝对安全
+     *   3) 深拷贝与时序：若 Service 返回时主动 copy，必须确保拷贝在
+     *      请求线程完成，而非延后到异步写出线程再做（时序窗口会缩小
+     *      错误难复现）
      *
-     * 四、性能视角：序列化在 HTTP 请求耗时中的占比
-     *   - 小对象（如本类）序列化耗时可忽略（微秒级）
-     *   - 列表/深层嵌套（Page<UserDto>）反射逐字段遍历，耗时随规模线性增长
-     *   - 大列表优化方向：DTO 精简字段、使用 @JsonInclude(NON_NULL) 去空、
-     *     或换用更快的序列化器（Jackson Afterburner / Protobuf）
-     *
-     * 五、泛型保留的机制：为什么前端能拿到 $.data.username
-     *   1) Java 泛型运行时擦除：ApiResponse<UserDto>.class 只是 ApiResponse.class
-     *   2) Spring 如何保留泛型：RequestResponseBodyMethodProcessor 从
-     *      MethodParameter 取 GenericReturnType（含 ParameterizedType），
-     *      递归解析到 UserDto；Jackson 用 JavaType 而非 Class 选择序列化器；
-     *      这就是 Page<UserDto> 内层字段不变成 LinkedHashMap 的根因
-     *   3) 反例：手动 ObjectMapper.convertValue(apiResponse, ApiResponse.class)
-     *      擦除后 data 只会成为 LinkedHashMap，字段需要字符串 key 访问
-     *   4) 修复方式：TypeReference<ApiResponse<UserDto>>(){} 或 JavaType 工厂
-     *   5) 配套规范：前端统一从 $.data 取数据，$.message 提示，$.success 分支
-     *
-     * 六、响应压缩与缓存头的框架层配合
-     *   1) server.compression.enabled=true + mime-types=application/json
-     *      由内嵌 Tomcat 的 CompressionFilter 完成 gzip，框架层零代码
-     *   2) 本类 timestamp 字段可用于客户端条件请求：>If-Modified-Since
-     *      但本项目未启用 ETag，纯文本 API 收益有限
-     *   3) 响应体大小与序列化耗时的关系：小对象压缩反而变慢，
-     *      生产环境建议 min-response-size=2KB 起步
+     * 四、JML 基础复习与事务内构造对象
+     *   1) happens-before 规则的记忆口诀（顺序由编译器与 CPU 都遵守）：
+     *      - 程序顺序规则：单线程内前面的操作 hb 后面的操作
+     *      - 锁规则：unlock hb 后续同一把锁的 lock
+     *      - volatile 规则：写 hb 后续读
+     *      - 线程启动规则：Thread.start hb 该线程内任一动作
+     *      - 线程终止规则：线程内任一动作 hb 他线程观察其结束（join/isAlive）
+     *   2) 应用到本对象：Service 在事务内构造 ApiResponse，事务提交
+     *      保证 DB 写入可见；但响应对象实体的字段同步语义与 DB 事务无关
+     *      两者是正交概念，不要混淆 DB 事务与内存可见性
+     *   3) 伪共享（False Sharing）说明：两个高频写的独立字段落在同一
+     *      CPU 缓存行（通常 64 字节），彼此 invalidate 对方的缓存行，
+     *      引发显著的性能下降；修复用 @Contended 或手工补齐填充字段。
+     *      本类字段写频率极低（构造即定），无伪共享之虑，仅作认识
      * =========================================================================
      */
 }
