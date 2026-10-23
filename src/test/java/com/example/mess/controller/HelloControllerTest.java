@@ -177,54 +177,32 @@ class HelloControllerTest {
 
     /*
      * =========================================================================
-     * 【Java 并发】MockMvc 的线程模型与并发请求模拟（非可执行代码）
+     * 【设计模式】Stub 模式：when().thenReturn() 的桩件本质（非可执行代码）
      * =========================================================================
      *
-     * 一、MockMvc 执行发生在哪个线程
-     *   1) 默认下 MockMvc.perform(...) 在测试主线程内同步执行：
-     *      构造 MockHttpServletRequest -> 直接调用 DispatcherServlet.doDispatch
-     *      -> 处理完成后立即返回 MvcResult -> 断言
-     *   2) 与真实 Tomcat 的差异：
-     *      - 没有真正的 Acceptor/Poller/网络 IO 线程
-     *      - 没有线程池排队 -> 并发竞争无法再现（死锁、线程饥饿测不出来）
-     *      - 没有 Servlet AsyncContext 超时的真实触发
-     *   3) 结论：MockMvc 用于"业务契约与序列化路径"的正确性测试，
-     *      并发行为必须换工具（真实容器 + 压测，或并发测试类）
+     * 一、桩件（Stub）的定义与本项目兑现
+     *   1) 桩 = 提前准备对特定输入的固定回答，被测类只依赖这些回答
+     *   2) 本类 @MockBean UserService 即桩：
+     *      when(service.hello(any())).thenReturn("Hello, Stub!")
+     *   3) 桩不验证任何交互——调用了几次、传了什么参数都无所谓，
+     *      只关心被测类在桩回答下产出正确结果
      *
-     * 二、模拟并发请求的两种方式
-     *   1) 直接循环调用（同线程顺序执行）：
-     *      for (int i = 0; i < 100; i++) mockMvc.perform(get("/hello"));
-     *      只验证"多次调用结果一致"，无任何并发效应
-     *   2) 多线程同时打 MockMvc：
-     *      var pool = Executors.newFixedThreadPool(8);
-     *      IntStream.range(0, 100).parallel.forEach(i ->
-     *        mockMvc.perform(get("/hello")));
-     *      注意：MockMvc 不是线程安全的，并发 perform 可能竞态失败
-     *      （内部 RequestContextHolder 等是 ThreadLocal，但拦截器注册表、
-     *       上下文状态可能冲突）-> 官方推荐每个线程独立 build MockMvc
-     *   3) 选型原则：契约验证用单线程 MockMvc；
-     *      并发竞争用 RANDOM_PORT + TestRestTemplate/HttpClient
+     * 二、Stub vs Mock 的实操分水岭
+     *   1) Stub 的问题形态："如果 service 返回 X，controller 应响应什么？"
+     *      断言目标是 controller 的输出
+     *   2) Mock 的问题形态："controller 是否调用了 service 且只一次？"
+     *      断言目标是 controller 对 service 的行为
+     *   3) 本类只打桩不 verify：因为 controller 是薄层，
+     *      它的价值在输出而非它如何调用下层——Stub 为主
+     *   4) 越下层/越有边界的类越适合 verify（如事务、发消息），
+     *      越上层/越面向响应的类越适合只 Stub
      *
-     * 三、ThreadLocal 在 MockMvc 里的行为差异
-     *   1) RequestContextHolder：MockMvc 在 perform 前设置、perform 后
-     *      清理（FrameworkServlet.processRequest 手动处理），
-     *      行为与真实 Servlet 基本一致
-     *   2) SecurityContext：spring-security-test 提供 @WithMockUser 注解，
-     *      机制是 SecurityContextPostProcessor 在请求前 set、请求后 clear
-     *      单线程测试 OK；多线程并发 perform 时每个线程的上下文管理易失控
-     *   3) MDC：MockMvc 不会自动设置 MDC，测试里想验证链路 ID 需要
-     *      在 mockFilter 里手动 put + clear（finally 块必要）
-     *   4) 任何自定义 Filter 涉及 ThreadLocal：测试必须同样走执行路径，
-     *      否则真实脏数据问题在单测中不会暴露
-     *
-     * 四、压测替代方案对比与选型
-     *   1) 单元级 + 单线程：MockMvc（本类），毫秒级，覆盖控制器路由
-     *   2) 集成级 + 并发：@SpringBootTest(RANDOM_PORT) + TestRestTemplate，
-     *      每个请求真实建 TCP/响应，能测连接池、线程池
-     *   3) 全链路压测：应用打包后 Gatling/JMeter/k6，模拟真实并发与吞吐
-     *      发现 MockMvc 永远抓不到的死锁、连接池耗尽、锁竞争热点
-     *   4) 混沌视角：在压测中注入异常（延迟、丢包），验证超时降级逻辑
-     *      这是"保护性并发设计"是否真正生效的唯一考验方式
+     * 三、桩件的可读性纪律
+     *   1) 桩要"即需即立"：测试体开头 setup，不要堆在每个断言间
+     *   2) 无关桩别打：用 lenient() 或改初始化策略，
+     *      避免未使用的桩抛 UnnecessaryStubbingException
+     *   3) 参数匹配器语义：any() 宽松匹配 vs 精确值，
+     *      测试意图决定：契约测试精确、行为测试 any
      * =========================================================================
      */
 }

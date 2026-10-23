@@ -205,55 +205,40 @@ public class ApiResponse<T> {
 
     /*
      * =========================================================================
-     * 【Java 并发】响应对象的安全发布、序列化线程安全与伪共享概念（非可执行代码）
+     * 【设计模式】统一响应封装与工厂方法：API 契约的形式化（非可执行代码）
      * =========================================================================
      *
-     * 一、响应对象的线程旅程
-     *   1) 本对象在单次请求的生命期内被三个阶段触碰：
-     *      - Service 返回值构造（工作线程 A）
-     *      - MessageConverter 序列化（仍是工作线程 A，方法栈内）
-     *      - 异步/响应式场景：跨入异步线程后再序列化（线程 A 构造、线程 B 写出）
-     *   2) 异步分支的风险点：若本对象在构造后被另一个线程修改，
-     *      写出线程可能读到中间态 -> 字段前后不一致的响应体
-     *   3) 防御模式：Service 一旦返回 ApiResponse，禁止再修改任何字段
-     *      （把升操作封装到静态工厂内，业务侧拿到的就是"冻结"对象）；
-     *      本类的 success(...) 与 error(...) 静态工厂即遵循此模式
+     * 一、封装变体的工厂方法（Factory Method on Steroids）
+     *   1) 本类 success(T data) / success(String message) / error(...) /
+     *      error(String message, String path) 是四组静态工厂方法
+     *   2) 比 new ApiResponse(true, "...", data, ...) 构造的优势：
+     *      a) 命名表达意图（success/error 是行为而非字段）
+     *      b) 保证不变式（success 自动 timestamp=true，error 不会误带 data）
+     *      c) 减少参数顺序错误（构造 6 参极易写反）
+     *   3) 这是 Effective Java Item 1 的直接落地：
+     *      "考虑用静态工厂方法代替构造器"，价值已在源码兑现
+
+     * 二、Null Object 模式与本类 error 的精神相通
+     *   1) 经典 Null Object：用一个"规规矩矩空行为"的对象替代 null，
+     *      消灭 NPE 与 if (x != null) 泛滥
+     *   2) 本类 error 时 data = null，调用方必须判 null 才能用 $.data.xxx
+     *   3) 演进方向（非本项目必做）：data 字段可声明为 Optional 或
+     *      提供 EmptyData 常量对象，把 null 判断推到类型系统
+     *   4) 权衡：显式 null 在前端解析 ($data 可能为 null) 已成行业惯例，
+     *      引入 Null Object 反而增加理解成本；保持 null 更直白
      *
-     * 二、时间戳与时区的并发陷阱
-     *   1) 本类 timestamp 默认在构造器初始化为 LocalDateTime.now()，
-     *      构造发生在工作线程 -> 写出时已定格，跨线程安全
-     *   2) 陷阱场景：若改为"惰性生成"（getter 内 if null then now()），
-     *      并发 getter 会产生两个不同的时间值，违反语义与可比性
-     *   3) 多线程取时间的性能：LocalDateTime.now() 在 JDK 17 后每次纳秒级，
-     *      无锁竞争，可放心高频调用；老代码用 System.currentTimeMillis
-     *      并发高频调用在部分平台有全局锁影响（现代 JDK 已优化）
-     *   4) 对齐时区：LocalDateTime 不含时区，序列化时使用系统默认时区；
-     *      分布式多区域部署时建议统一存 Instant（UTC）+ 输出时转换
-     *
-     * 三、泛型字段与类型擦除的并发视角
-     *   1) ApiResponse<T> 的 data 字段类型在运行时擦除为 Object：
-     *      静态工厂传入的实参对象类型与安全性由调用方保证
-     *   2) data 指向的实体可变性决定整体安全性：
-     *      - Date/可变 POJO -> 跨线程存在被修改的可能
-     *      - DTO/record/集合不可变包装 -> 绝对安全
-     *   3) 深拷贝与时序：若 Service 返回时主动 copy，必须确保拷贝在
-     *      请求线程完成，而非延后到异步写出线程再做（时序窗口会缩小
-     *      错误难复现）
-     *
-     * 四、JML 基础复习与事务内构造对象
-     *   1) happens-before 规则的记忆口诀（顺序由编译器与 CPU 都遵守）：
-     *      - 程序顺序规则：单线程内前面的操作 hb 后面的操作
-     *      - 锁规则：unlock hb 后续同一把锁的 lock
-     *      - volatile 规则：写 hb 后续读
-     *      - 线程启动规则：Thread.start hb 该线程内任一动作
-     *      - 线程终止规则：线程内任一动作 hb 他线程观察其结束（join/isAlive）
-     *   2) 应用到本对象：Service 在事务内构造 ApiResponse，事务提交
-     *      保证 DB 写入可见；但响应对象实体的字段同步语义与 DB 事务无关
-     *      两者是正交概念，不要混淆 DB 事务与内存可见性
-     *   3) 伪共享（False Sharing）说明：两个高频写的独立字段落在同一
-     *      CPU 缓存行（通常 64 字节），彼此 invalidate 对方的缓存行，
-     *      引发显著的性能下降；修复用 @Contended 或手工补齐填充字段。
-     *      本类字段写频率极低（构造即定），无伪共享之虑，仅作认识
+     * 三、值对象（Value Object）判定与 equals 缺失的影响
+     *   1) 本类是否应为值对象？严格判定："两个 ApiResponse 相同字段
+     *      完全一致，是否就视为等价？" —— 是（响应值本身无身份）
+     *   2) 现状：未重写 equals/hashCode（继承 Object 的引用相等）
+     *      - 影响：放入 Set/Map 作 key 会以引用区分，一般无碍
+     *      - 若需要去重或断言相等（如测试中 assertEquals(response1, response2)）
+     *        则要补 equals；AssertJ 提供了 usingRecursiveComparison 替代
+     *   3) 与 UserDto 的一致性原则：传输对象都按"引用传递即弃"使用，
+     *      不强求 equals；一旦被缓存或入集合，再补齐
+     *   4) timestamp 字段破坏纯值对象语义（每次实例化都不同）：
+     *      equals 若含 timestamp 则两个"同内容"对象也不等 ——
+     *      这是响应对象与纯值对象的本质差异，不可混淆
      * =========================================================================
      */
 }

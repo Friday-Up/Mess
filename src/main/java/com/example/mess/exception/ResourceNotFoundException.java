@@ -60,56 +60,41 @@ public class ResourceNotFoundException extends RuntimeException {
 
     /*
      * =========================================================================
-     * 【Java 并发】自定义异常的并发属性：栈快照、构造开销与跨线程传播（非可执行代码）
+     * 【设计模式】特化异常与异常/事件双轨制：控制流 vs 广播流（非可执行代码）
      * =========================================================================
      *
-     * 一、Throwable 对象本身的并发安全性
-     *   1) 构造时通过 fillInStackTrace 抓取栈快照写入 detailMessage 与
-     *      backtrace 数组，之后只读 -> 异常对象可跨线程安全传递与打印
-     *   2) 唯一的可变状态：cause 字段通过 initCause 设置一次（之后抛
-     *      IllegalStateException），所以"构造完不要 initCause"是约定
-     *   3) 本类两构造器：单参 message、双参 message+cause 均安全；
-     *      无参默认消息构造在抛出线程执行，也是构造即定值
+     * 一、特化异常（Specialized Exception）：语义即类型
+     *   1) 本类继承 RuntimeException，为一类业务事实（资源不存在）
+     *      建立专属类型——模式上近似值对象的精神：
+     *      让类型携带语义，而非靠 message 字符串约定
+     *   2) 三重收益在项目兑现：
+     *      a) GlobalExceptionHandler 用 @ExceptionHandler(本类) 精确映射：
+     *         404 + ApiResponse(false)，无字符串魔法判断
+     *      b) 调用方可按类型分支：catch (ResourceNotFoundException e)
+     *         与其他异常清晰区分
+     *      c) 监控/日志可按异常类埋点：Micrometer Counter 加 tag
+     *         exception=ResourceNotFoundException，趋势可观测
+     *   3) 反面警示：每个错误建一个异常类会稀释可读性，
+     *      按 HTTP 语义粒度收敛（4xx 业务类 2-3 个足够）
      *
-     * 二、栈快照的线程语义
-     *   1) 快照来自"调用 fillInStackTrace 的线程"，而非"最初 new Throwable
-     *      的业务线程"——绝大多数场景两者相同
-     *   2) 跨线程传播后，日志看栈回溯到的是抛出点，不是接收点：
-     *      对异步排错非常关键，不要被"接收线程的栈"误导
-     *   3) 栈是"线程当时的快照"：后续方法进出不会更新已抓取的栈
-     *   4) 性能视角：fillInStackTrace 是 synchronized native 方法，
-     *      高频抛同一异常会成为隐形热点；可子类覆盖它返回 this 省栈
-     *      （代价：丢失排错信息，适用于确定性极强的控制流异常）
+     * 二、异常 vs 事件：同一业务事实的双轨表达
+     *   1) 异常：同步、局部、调用方必须处理，表达"走不下去"
+     *   2) 事件：广播、可同步可异步、订阅者按需响应，
+     *      表达"这事儿发生了，谁关心谁处理"
+     *   3) 双轨并行的架构收益（本项目演进方向）：
+     *      Service 抛本异常 -> 全局处理器返回 404（主流程，快返回）
+     *      Service 同时发布 ResourceNotFoundEvent ->
+     *      审计订阅者写访问日志、监控订阅者打点（旁路，不拖主流程）
+     *   4) 分工铁律：主流程错误码靠异常决定；
+     *      跨模块联动靠事件传递——混用会让调用链难追踪
      *
-     * 三、异常与线程的"中断标记"交互
-     *   1) InterruptedException 的语义：线程在阻塞期间被告知中断
-     *      - 收到后应尽快结束任务或重新设置中断标记
-     *      - 不处理会破坏上层停止逻辑
-     *   2) 本类不抛中断异常，但业务里调用线程池 shutdownNow / future.cancel
-     *      会让任务在 sleep/queue.take 时收到 InterruptedException
-     *   3) 正确模板：
-     *      try { Thread.sleep(1000); } catch (InterruptedException e) {
-     *         Thread.currentThread().interrupt(); // 恢复中断标记供上级判断
-     *         throw new ResourceNotFoundException(任务被中断, e);
-     *      }
-     *   4) 优雅停机场景：Tomcat 关闭时工作线程可能在 IO 阻塞上，
-     *      Spring 的 Lifecycle 机制会给超时 -> 强制退出前尽量写好响应
-     *
-     * 四、异常链与堆栈深度的连带影响
-     *   1) cause 链：打印时会完整输出整条链，深度过深（套娃异常）会让
-     *      日志膨胀 -> 最多保留两层语义异常，底层用 root cause
-     *   2) 线程栈过深（如递归查询、深层代理包装）打印代价大，
-     *      监控型场景建议截断前 N 帧（logback %ex{5} 只打 5 帧）
-     *   3) 本异常被 GlobalExceptionHandler 转 404 响应，不在响应体
-     *      里带栈 -> 安全也简洁；JSON 明文栈只用于内部日志
-     *
-     * 五、并发异常设计的两条结语
-     *   1) 异常对象"构造即快照"，跨线程传递安全，但理解栈的原生线程
-     *      能避免排错方向走偏
-     *   2) 同步代码用异常表达业务分支可以，但高频路径内频繁抛异常
-     *      会与 synchronized/IO 一起成为并发热点 ->
-     *      "可预期的业务不快"（404 查询不存在）应考虑前置缓存或布隆
-     *      校验减量，而非让异常当业务结果用
+     * 三、异常构造的工厂方法化（可选收敛）
+     *   1) 本类现有三构造器（message / message+cause / 默认）
+     *   2) 若调用点高频重复："用户不存在: " + id 散落多处，
+     *      可收敛静态工厂：notFound(Long id) 统一文案格式，
+     *      与 ApiResponse.success/error 风格呼应
+     *   3) 判定：构造点 >= 3 处且文案需统一时引入工厂；
+     *      散点各异文案则保留构造器直接调用
      * =========================================================================
      */
 }

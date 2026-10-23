@@ -129,53 +129,36 @@ public class HelloController {
 
     /*
      * =========================================================================
-     * 【Java 并发】Tomcat 线程模型、Servlet 线程安全与 ThreadLocal 清理（非可执行代码）
+     * 【设计模式】门面模式：Controller 如何向客户端隐藏内部复杂性（非可执行代码）
      * =========================================================================
      *
-     * 一、内嵌 Tomcat 的线程分工（请求一进一出谁在干活）
-     *   1) Acceptor 线程（1 个，ServerSocket.accept 阻塞循环）：
-     *      只负责收 TCP 连接，把 NioChannel 注册给 Poller，绝不做业务
-     *      经验：连接洪水攻击时此线程最先排队，但业务 CPU 不高
-     *   2) Poller 线程（默认 1-2 个，基于 NIO Selector）：
-     *      监听 OP_READ 就绪，把就绪通道包装成任务交给 Executor
-     *   3) Executor 工作线程（默认池 maxThreads=200，minSpare=10，namePrefix=pool-N）：
-     *      解析 HTTP 报文 -> 走 Filter 链 -> 进 DispatcherServlet -> 执行本类
-     *      hello() 方法 -> 写响应 -> 线程回池
-     *   4) 线程回池的含义：池化线程体（PooledThreadRunnable）被复用，
-     *      但 ThreadLocal 不会被容器清除 -> 这是脏数据的主要来源
+     * 一、门面模式（Facade）的定义与本项目对应
+     *   1) GoF 定义：为子系统中的一组接口提供一个一致的界面，
+     *      Facade 定义了一个高层接口，使子系统更容易使用
+     *   2) 本类即门面：客户端只需 GET /hello?name=x 得到问候语，
+     *      完全不需要知道背后有：路由注册 -> 参数解析 -> Service ->
+     *      Repository -> 缓存/事务 -> 序列化 这套子系统
+     *   3) 门面的核心价值不是"隐藏实现"而是"降低耦合宽度"：
+     *      客户端耦合 1 个门面接口，而非 N 个子系统接口，
+     *      子系统内部重构几乎不影响契约
      *
-     * 二、Controller 的线程安全基线
-     *   1) 本类只持有一个 final 依赖（UserService 注入）与无状态方法：
-     *      天然线程安全，多个 Tomcat 线程可同时进入 hello() 互不干扰
-     *   2) 何时会出问题？向本类加了共享可变字段：
-     *      private int hitCount;  // 两个请求线程同时 hitCount++ 会丢更新
-     *   3) 线程安全的修法按场景：
-     *      - 计数：AtomicInteger 或 LongAdder（高并发更优）
-     *      - 收集结果：ConcurrentHashMap / CopyOnWriteArrayList
-     *      - 复合判断：synchronized 块或 ReentrantLock（见 UserService 块）
-     *   4) 方法内的局部变量：每个线程有独立栈帧，局部引用绝无共享，
-     *      写业务逻辑应尽量把状态压到方法局部，缩小共享面
-     *
-     * 三、ThreadLocal 的使用与污染排查
-     *   1) 常见用途：MDC 日志链路 ID、用户上下文、DB 连接绑定（JDBC），
-     *      Spring 事务管理器正是用 ThreadLocal 把连接绑到当前线程
-     *   2) Tomcat 线程池复用线程：上一次请求设置的 ThreadLocal 值
-     *      若不 remove，会被下一次请求读到 -> 脏数据、权限串号
-     *   3) 正确模式（finally 清理不可省）：
-     *      try { CONTEXT.set(user); doWork(); } finally { CONTEXT.remove(); }
-     *   4) 排查手段：压测压出"偶现串号"问题，先翻 ThreadLocal 使用点，
-     *      再用 jstack 看工作线程栈里残留的 Filter/Interceptor；线上用
-     *      arthas thread -b 或 ThreadLocal 网关埋点做脏数据拦截
-     *
-     * 四、同步与异步 Servlet 的界限
-     *   1) 传统 Servlet（本类）：一个请求占一个工作线程直到响应写出
-     *   2) 异步 Servlet（startAsync + DeferredResult）：Release 工作线程，
-     *      业务线程完成后回调写响应，适合长耗时外部调用
-     *   3) Spring MVC 的 @Async 返回值机制（DeferredResult/Callable/SseEmitter）
-     *      底层即异步 Servlet，但并不自动换线程池，需自定义 TaskExecutor
-     *   4) 判断准则：CPU 密集任务别异步（线程切换反而更慢）；
-     *      IO 密集任务（远程调用、写文件）才值得释放 Tomcat 线程
-     *   5) /hello 这类零依赖接口应保持同步，异步化反而增加状态机复杂度
+     * 二、RESTful 门面的设计纪律
+     *   1) 门面只做语言翻译：HTTP 协议语言 <-> 业务调用语言
+     *      合法内容：参数校验、协议状态码映射、DTO 装配
+     *      越界信号：出现 if/else 业务分支、直接操作其他领域对象
+     *   2) 本类 hello/helloAdvanced/helloPost 三个端点是三条独立门面路径，
+     *      各自薄而直；若三者出现共享私有方法即说明该下沉到 Service
+     *   3) 门面数量控制：一个 Controller 对一个领域聚合，端点 ≤ 7 个，
+     *      超出时拆分门面（UserController 只管用户，不捎带订单查询）
+
+     * 三、与代理/适配器的同与异（容易混淆的三兄弟）
+     *   1) 门面（Facade）：简化子系统，结构上"多包一"，主动封装
+     *   2) 代理（Proxy）：控制对单个对象的访问，结构上"一对一"，
+     *      与被代理者接口相同（Spring AOP 代理即典型，见 UserService 块）
+     *   3) 适配器（Adapter）：转换接口，让不兼容的协同，
+     *      HandlerAdapter 即此（见 UserController 块）
+     *   判断口诀：简化多系统 -> 门面；同一接口换控制 -> 代理；
+     *   换接口协同 -> 适配器
      * =========================================================================
      */
 }

@@ -143,66 +143,45 @@ public class SecurityConfig {
 
     /*
      * =========================================================================
-     * 【Java 并发】SecurityContext 的线程传播、ThreadLocal 策略与异步链路（非可执行代码）
+     * 【设计模式】过滤器链与 DSL 式配置：Security 的管道与嵌套建造（非可执行代码）
      * =========================================================================
      *
-     * 一、SecurityContextHolder 的四种策略（MODE_*）
-     *   1) MODE_THREADLOCAL（默认）：上下文存 ThreadLocal，绑定当前请求线程
-     *   2) MODE_INHERITABLETHREADLOCAL：子线程会"继承"父线程上下文副本
-     *      用途有限：仅对"主线程直接 new Thread"的场景生效
-     *      局限：Tomcat 线程池复用线程 -> 不会走继承路径，上下文丢失
-     *   3) MODE_GLOBAL：静态 JVM 全局共享，测试代码偶尔使用，Web 勿用
-     *   4) 自定义策略：实现 SecurityContextHolderStrategy 并注册，
-     *      响应式项目里常用"基于 Reactor Context"的实现
-     *
-     * 二、Tomcat 线程池与 InheritableThreadLocal 的错配
-     *   1) 期望场景：请求线程启动异步任务，任务线程自动拿到用户身份
-     *   2) 实际行为：Tomcat 工作线程从线程池取线程，此线程不是
-     *      "当前请求线程 new 出来的子线程"，不走 Inheritable 逻辑
-     *   3) 后果：开 MODE_INHERITABLETHREADLOCAL 后，从池中借到的线程
-     *      还带着上一个请求残留的安全上下文 -> 身份串号 + 越权风险
-     *   4) Spring 的解法：DelegatingSecurityContextRunnable/Callable 包装，
-     *      把父线程上下文复制进任务再传给线程池（TaskDecorator 配合）
-     *   5) Spring Security 的 WebAsyncManagerIntegrationFilter 正是
-     *      自动为 @Async、DeferredResult、Callable 完成这个复制与清理
-     *
-     * 三、SecurityContext 在 @Async 场景的正确姿势
-     *   1) 场景：Controller 里 @Async 方法记录审计日志，日志需要用户信息
-     *   2) 步骤：
-     *      - 全局配置 TaskDecorator：复制 SecurityContext、MDC、RequestContextHolder
-     *      - 线程执行完任务后清理（finally），否则线程复用引起串号
-     *   3) 代码骨架：
-     *      class ContextTaskDecorator implements TaskDecorator {
-     *         public Runnable decorate(Runnable task) {
-     *            var ctx = SecurityContextHolder.getContext();
-     *            var mdc = MDC.getCopyOfContextMap();
-     *            return () -> {
-     *               try { SecurityContextHolder.setContext(ctx); if (mdc != null) MDC.setContextMap(mdc); task.run(); }
-     *               finally { SecurityContextHolder.clearContext(); MDC.clear(); }
-     *            };
-     *         }
-     *      }
-     *   4) 注意：setContext 传引用是安全的，因为 Authentication 绝大多数实现
-     *      不可变或构造后不修改（UsernamePasswordAuthenticationToken 字段定后不变）
-     *
-     * 四、Spring Security 的并发相关隐患清单
-     *   1) SecurityContextHolderStrategy 被自定义为按请求存储但未在 Filter
-     *      末尾清理 -> 线程复用时身份泄漏（安全漏洞级别，高于脏数据）
-     *   2) 使用 SecurityContextRepository 手动 saveContext 但未走
-     *      SecurityContextHolderFilter 的标准链路 -> 读写不一致
-     *   3) CSRF 禁用（本类 disable）只对无状态 API 安全，
-     *      若未来要加表单登录/Session 功能，必须恢复 CSRF
-     *   4) 并发会话控制：maximumSessions(n).maxSessionsPreventsLogin(true)
-     *      会基于 SessionRegistry 做并发登录限制；与并发线程无关，
-     *      是"同一用户的会话数上限"，配版权系统时常用
-     *
-     * 五、线程爆炸的检查表（安全相关）
-     *   1) Tomcat 工作线程：jstack 看不到空闲 -> accept 排队 -> 连接拒绝
-     *   2) @Async 线程：队列堆积 -> 内存涨 -> 满了走拒绝策略
-     *   3) 定时任务：若 run() 阻塞且未配并发控制 -> 下次触发又起一线程
-     *      （Spring 的 ThreadPoolTaskScheduler 不会为同任务并发调度）
-     *   4) 缓存加载线程：大 key 全量预热时占满池 -> 业务请求排队等待
-     *      缓存初始化完成后才恢复 -> 用低优先级或独立池隔离
+     * 一、责任链模式（Chain of Responsibility）：Filter 链的骨架
+     *   1) 定义：多个处理器依次处理同一请求，每个处理器决定
+     *      继续传递或终止，Handler 不必知道整条链
+     *   2) Servlet Filter 链：Filter.doFilter(req, resp, chain) 内部
+     *      chain.doFilter 把请求交给下一个 Filter，最终到 Servlet
+     *   3) Spring Security 的 FilterChainProxy 再加一层：
+     *      先按 SecurityFilterChain 列表选一条链，再在那条
+     *      链上依次执行约 12-16 个 Security Filter（授权/Csrf/会话等），
+     *      每个克隆 Filter 只管自己的职责，责任链式推进
+     *   4) 价值：新增 Filter 不改现有代码（OCP）；
+     *      排序即策略（@Order / SecurityFilterChain 的序号）
+
+     * 二、建造者模式的 DSL 化：HttpSecurity 的链式配置
+     *   1) 本类 securityFilterChain 方法体即 DSL：
+     *      http.authorizeHttpRequests(auth -> auth
+     *         .requestMatchers("/hello/**").permitAll()
+     *         .anyRequest().authenticated())
+     *        .formLogin(form -> form.loginPage("/login").permitAll())
+     *        .csrf(csrf -> csrf.disable());
+     *   2) 本质是 Builder 的"返回自身以链式调用"：
+     *      authorizeHttpRequests 返回 AuthorizeHttpRequestsConfigurer，
+     *      permitAll 返回同类型，形成类型安全的构造剧本
+     *   3) 与经典 Builder 的差异：参数用 Lambda 而非 setter，
+     *      形成"嵌套闭包 DSL"——更收敛地表达层级关系
+     *   4) 模式启示：Constraint Violation、DataSource.initializer、
+     *      RabbitTemplate 都用了同款 DSL，可借鉴到自研配置类
+
+     * 三、策略模式（Strategy）：AuthenticationProvider 可插拔
+     *   1) 本类用的是 InMemoryUserDetailsManager（内存式存储），
+     *      生产可替换为 JdbcUserDetailsManager / 自定义 UserDetailsService，
+     *      Spring Security 只依赖接口不绑定实现
+     *   2) AuthenticationManager 内部委托给 AuthenticationProvider 列表：
+     *      DaoAuthenticationProvider（用户名密码）/ JwtAuthenticationProvider
+     *      （JWT 场景），按 supports(en) 各取所需，策略式分派
+     *   3) 与依赖注入的协同：策略类由容器管理、配置类挑选装配，
+     *      模式与框架在这儿形成闭环，不是模板式的空街舞
      * =========================================================================
      */
 }

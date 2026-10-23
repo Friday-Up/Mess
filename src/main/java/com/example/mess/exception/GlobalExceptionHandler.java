@@ -82,55 +82,48 @@ public class GlobalExceptionHandler {
 
     /*
      * =========================================================================
-     * 【Java 并发】全局异常处理的线程视角：栈、未捕获处理器与异步异常（非可执行代码）
+     * 【设计模式】责任链与观察者：异常解析链的分派与事件广播（非可执行代码）
      * =========================================================================
      *
-     * 一、异常栈为什么带"线程字段"
-     *   1) 每个 Throwable 构造时通过 fillInStackTrace 抓取当前线程栈快照，
-     *      栈帧依附在抛出它的那个线程上
-     *   2) 打印方式：异常跨线程传播后，日志里的栈仍是"构栈栈"，
-     *      不会变成"打印线程"的栈；这也是异步任务异常排错难的根源之一
-     *   3) 线程名出现在报错头的概率：logback 图案含 %thread，能区分
-     *      pool-2-thread-1 是哪个池（命名规范在此体现价值，见启动注释块）
+     * 一、分派式责任链：HandlerExceptionResolver 的选路逻辑
+     *   1) DispatcherServlet 持有 HandlerExceptionResolverComposite，
+     *      依次询问已注册解析器：
+     *      ExceptionHandlerExceptionResolver -> ResponseStatusExceptionResolver
+     *      -> DefaultHandlerExceptionResolver
+     *   2) 每个解析器尝试 resolveException 返回 ModelAndView：
+     *      返回非空即命中（本类 @ExceptionHandler 在第一个解析器命中）；
+     *      全部为空则异常被抛给容器，表现为 500 页面
+     *   3) 与纯责任链（Servlet Filter）的差异：
+     *      Filter 链每环节主动链式调用下一个（doFilter 转交）；
+     *      异常链由调度者统一遍历，命中即停——分派模式
      *
-     * 二、全局异常处理器的调用线程
-     *   1) 本类 @ExceptionHandler 由 DispatcherServlet 调用，
-     *      执行线程 = 抛异常的 Tomcat 工作线程（同一线程，无切换）
-     *   2) 推论：异常处理中可继续使用当前线程的 ThreadLocal 资源
-     *      （安全上下文仍在、事务绑定仍在，但事务已被标记回滚）
-     *   3) 注意：处理逻辑中不可再抛需要回滚的异常否则吞掉，本类用
-     *      ResponseEntity 返回是稳妥做法（HTTP 响应代替异常继续传播）
+     * 二、@ControllerAdvice：注册表 + 选择器，不是观察者
+     *   1) 表面：多个 Advice Bean 关注 Controller 异常，状似广播
+     *   2) 实质：RequestMappingHandlerAdapter 维护 "
+     *      异常类型 -> @ExceptionHandler 方法"注册表，
+     *      抛异常时按类型查找第一个匹配方法执行，不是多播
+     *   3) 推论：同一异常多个 Advice 都有 @ExceptionHandler 时
+     *      只执行 @Order 最优先者，而非全部回调
      *
-     * 三、异步链路中的异常传播
-     *   1) @Async void 返回值：异常走 AsyncUncaughtExceptionHandler，
-     *      默认仅打 ERROR 日志 -> 必须注册自定义处理器上报监控/告警
-     *   2) @Async CompletableFuture：异常被封装到 future，
-     *      调用方 .join()/.get() 才抛出 CompletionException（包装原异常）
-     *      忘记 .exceptionally 会默默吞掉错误
-     *   3) CompletableFuture.supplyAsync 不带 Executor 时用 ForkJoinPool，
-     *      异常栈出现在 ForkJoinPool worker 线程 -> 加 taskExecutor 便于区分
-     *   4) 本类可拓展：@ExceptionHandler(CompletionException.class) 解包后
-     *      转给具体异常处理器，避免前端拿到原始并发异常
+     * 三、观察者模式（Observer）的真正落点：Spring 应用事件
+     *   1) 事件总线：ApplicationEventPublisher.publishEvent(event)
+     *      订阅端：@EventListener 方法/ @TransactionalEventListener
+     *   2) 默认同步执行（同线程、同事务），加 @Async 转异步
+     *   3) 与异常处理互补的架构定位：
+     *      异常处理：拦截控制流（返回 404 给客户端）
+     *      事件广播：旁路通知（审计记录、缓存失效、监控打点）
+     *      互不替代，常相伴：抛 ResourceNotFoundException 时
+     *      同时可发布 ResourceNotFoundEvent 供审计订阅
+     *   4) 弱观察 vs 强观察：Spring 事件是"中介者"模式实现的
+     *      广播（Publisher 不知道谁订阅），真正解耦
      *
-     * 四、UncaughtExceptionHandler 与线程的优雅退出
-     *   1) 线程 run() 抛未捕获异常 -> 线程终止 -> 按 Thread.getUncaughtExceptionHandler
-     *      处理（默认打印 stderr）
-     *   2) Tomcat/Jetty 都为工作线程设置了处理器：把异常交给容器日志，
-     *      并决定是否替换/保留该线程
-     *   3) 自建线程池建议保留 ThreadFactory 的命名与 UncaughtExceptionHandler：
-     *      pool 是你的，栈里没名字没告警，排查就是盲人摸象
-     *   4) 线程终止的内存副作用：ThreadLocal Map 随线程对象销毁而回收，
-     *      但线程池复用线程意味着不销毁 -> 持有的 ThreadLocal 值若指向
-     *      类加载器还会阻止类卸载 -> 严重的内存泄漏点（热部署环境尤甚）
-     *
-     * 五、错误结构化与多线程日志关联
-     *   1) 本类返回 ApiResponse 结构化的统一错误响应，对前端友好
-     *   2) 服务端日志应附 traceId：用 MDC 注入（Filter/Interceptor），
-     *      多线程编排时通过 TaskDecorator 复制 MDC，保证:async-3 与
-     *      pool-1 的日志在同一 traceId 下可关联
-     *   3) 排错口诀：先按 traceId 聚合 -> 再按线程名分组 -> 最后读栈
-     *   4) 敏感信息在异常 message 的脱敏规则同样适用于多线程日志
-     *      采集（ELK 侧做 mask，而非仅在此处理器里做）
+     * 四、兜底处理器的"终点保证"原则
+     *   1) 本类 handleGenericException(Throwable e) 是链终点：
+     *      无论发生什么未知异常，都转 500 + 脱敏 message
+     *   2) 责任链设计纪律：终点必须无条件捕获、保证有出口，
+     *      否则异常会以未处理状态冲击容器默认页
+     *   3) 终点记日志 ERROR 级（全链唯一该 ERROR 的地方），
+     *      业务可控异常（404/400）记 WARN/INFO——告警噪声控制命脉
      * =========================================================================
      */
 }

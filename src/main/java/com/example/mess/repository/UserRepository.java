@@ -91,59 +91,44 @@ public interface UserRepository extends JpaRepository<User, Long> {
 
 /*
  * =========================================================================
- * 【Java 并发】数据访问层并发画像：连接池、事务绑定与游标资源（非可执行代码）
+ * 【设计模式】仓储模式与 JDK 动态代理：从 DAO 到领域仓储（非可执行代码）
  * =========================================================================
  *
- * 一、HikariCP 的线程与池化模型
- *   1) 连接池不是业务线程池：工作线程（Tomcat）向池 borrow 连接，
- *      使用期间独占一个物理 JDBC 连接，用完 return 归还
- *   2) Hikari 自身只有少量后台线程：
- *      - houseKeeper：定期调的线程（线程池定时调度），负责空闲剔除
- *      - addConnectionExecutor：池空且未达上限时异步建新连接
- *      - closeConnectionExecutor：异常连接的异步关闭
- *   3) 池大小经验值（官方公式）：connections = core_count * 2 + 有效磁盘数
- *   4) 池太小的症状：Tomcat 工作线程阻塞在 HikariPool.getConnection
- *      （connectionTimeout 抛 SQLTransientConnectionException）；
- *      池太大的症状：MySQL 侧大量活跃连接竞争 CPU/锁，RT 全体上升
- *   5) 切勿用线程数反推连接数：200 工作线程配 500 连接是灾难，
- *      连接上限本质是数据库并发处理能力，而非应用线程数
+ * 一、仓储模式（Repository / DDD 企业模式）
+ *   1) 定位：模仿集合（Set/Map）语义管理领域对象（聚合根），
+ *      屏蔽持久化细节（库/ORM/文件），领域层只面向"集合"
+ *   2) 与 DAO 的关键差异：
+ *      - 面向对象：DAO 面向数据表（UserDao 的方法映射 SQL），
+ *        Repository 面向聚合根（返回 User 聚合整体而非数据行）
+ *      - 方法语义：DAO 技术语义（selectByEmail），
+ *        Repository 业务语义（findByUsername / existsByEmail）
+ *      - 边界：一个聚合根一个 Repository；子实体不单独建
+ *      （UserAddress 随 User 仓储一起加载保存）
+ *   3) 本接口天然符合：方法名领域语义、管理 User 聚合、
+ *      隐藏 JPA 实现细节（调用方不知道底层是 Hibernate 还是别的）
+
+ * 二、工厂模式（Factory Method）：JpaRepositoryFactoryBean
+ *   1) 本接口在容器中的 BeanDefinition 不是接口本身，
+ *      而是 JpaRepositoryFactoryBean（FactoryBean 接口的实现）
+ *   2) FactoryBean.getObject() 即工厂方法：运行时决定产出什么——
+ *      这里产出的是"实现了本接口的 JDK 动态代理对象"
+ *   3) 动态代理（Proxy 的运行时形态）
+ *      a. 构造默认实现 SimpleJpaRepository 实例（带 EntityManager）
+ *      b. QueryExecutorMethodInterceptor 作为 InvocationHandler
+ *      c. Proxy.newProxyInstance 生成 $ProxyNN，implements 本接口
+ *   4) 一次方法调用的旅程序：
+ *      proxy.findByUsername("x") -> handler.invoke ->
+ *      判断：派生查询 or 默认方法？-> 找到对应执行 -> 返回
+ *      - existsByUsername：存在检查走 exists 投影
+ *   5) 设计启示：接口 + 默认行为 + 代理拦截 的组合
+ *      让"声明即实现"成为可能，Spring Data 的核心竞争力即此
  *
- * 二、事务与连接的 ThreadLocal 绑定
- *   1) 开始事务时，Spring 从 Hikari 借出连接，并通过
- *      TransactionSynchronizationManager.bindResource 把连接绑到
- *      当前线程的 ThreadLocal（key=dataSource，value=ConnectionHolder）
- *   2) 本接口内任一 SQL 执行都隐式 fetch 当前线程绑定的连接，
- *      同一线程同一事务内多次调用共享同一连接
- *   3) ThreadLocal 意味着事务与线程强绑定：
- *      - @Async 的子线程拿不到外层事务（新事务必需新连接）
- *      - CompletableFuture.supplyAsync(() -> repo.save(x)) 在 ForkJoinPool
- *        上执行，连接与事务全部与调用方脱钩（常见 Bug 源头）
- *   4) 事务方法内必须避免：远程调用的线程切换（并 await）、
- *      手动 new Thread 做数据库写操作、CompletableFuture 跨池编排
- *      -> 事务边界内只做同线程的 DB 操作
- *
- * 三、JPA 代理对象的线程安全边界
- *   1) 本接口的代理对象（com.sun.proxy 类）内部主要持有方法映射表
- *      与 EntityManager（每次方法调用各自获取），没有可变业务状态
- *   2) 返回的 Optional 是不可变的，跨线程传递安全（前提：实体本身
- *      在传递期间不被并发修改，见 User 注释块）
- *   3) 注意 Stream 查询（@Query 返回 Stream）：必须 try-with-resources，
- *      未 close 会泄漏底层 ResultSet 与连接，连接池被抽干是常见事故
- *   4) 分页查询的 Page 实现类（PageImpl）持有 List 快照，是"弱不可变"：
- *      内部 List 可变 -> 跨线程共享前考虑 unmodifiableList 包装
- *
- * 四、乐观锁与数据库原子抵探单例
- *   1) existsByUsername 的并发问题：两个线程同时查询"是否已存在"
- *      都返回 false，随后都 save -> 由数据库唯一索引兜底（应用层
- *      不报错，数据库抛唯一约束冲突 -> DataIntegrityViolationException）
- *   2) 正确的"计数类更新"应走原子 SQL 而非"查-改-存"：
- *      UPDATE user SET login_count = login_count + 1 WHERE id = ?
- *      （单条 SQL 在数据库侧原子，无需 Java 层加锁）
- *   3) JPA 之所以在并发更新用 save + version：
- *      - 无 version 字段时，两次 save 是 put 一致，后者覆盖前者（丢更新）
- *      - 加 @Version 后，update 带版本条件，失败抛
- *        ObjectOptimisticLockingFailureException，由调用方决定重试
- *   4) 项目决策点：当前 User 无高并发写，最小可行解是非乐观锁；
- *      若未来引入"并发改名/改邮箱"，version 是成本最低的修正方案
+ * 三、规范模式（Specification）与查询对象
+ *   1) Specification<T> 是标准模式：用对象封装查询条件，
+ *      而不是拼字符串或写死 JPQL
+ *   2) 本项目如有多条件搜索需求：让本接口 extends
+ *      JpaSpecificationExecutor<User> 获得 where(and/or) 组合能力
+ *   3) 模式边界：Specification 适合"运行时动态条件"，
+ *      固定查询仍用派生方法命名（更简洁、可读）
  * =========================================================================
  */

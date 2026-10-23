@@ -56,65 +56,39 @@ class MessApplicationTests {
 
     /*
      * =========================================================================
-     * 【Java 并发】并发测试与 TestContext 线程模型：缓存、隔离与竞态检证（非可执行代码）
+     * 【设计模式】测试替身总览：Dummy/Stub/Fake/Mock/Spy 五兄弟（非可执行代码）
      * =========================================================================
      *
-     * 一、@SpringBootTest 的线程环境
-     *   1) 主线程：JUnit 的测试执行线程（IDE/CI 的 surefire 工作线程）
-     *      负责拉起 ApplicationContext、执行每个 @Test 方法、收集结果
-     *   2) 容器引入的后台线程：
-     *      - Tomcat 的 Acceptor/Poller/工作线程池（默认在 RANDOM_PORT 时启动）
-     *      - HikariCP 的 houseKeeper、addConnectionExecutor
-     *      - Spring 的 TaskScheduler（若引入了 @Scheduled）
-     *   3) 主线程不会等后台线程：测试方法一旦返回 -> 线程报告给出结论，
-     *      后台线程若仍在跑异步业务 -> 断言已结束，结果可能晚到 -> 浅断言
-     *      -> 测试看起来过，其实业务没完成（异步测试经典陷阱）
+     * 一、测试替身（Test Double）的谱系（Gerard Meszaros 定义）
+     *   1) Dummy：只满足签名，从不被实际使用
+     *      例：new User(null, null, null, null, null) 只为编译通过
+     *   2) Stub：预置返回值，让被测类得到必要输入
+     *      例：when(repo.findById(1L)).thenReturn(Optional.of(user))
+     *   3) Fake：有真实简化实现，但不能用于生产
+     *      例：用 H2 内存库替代 MySQL——本项目正是此路
+     *   4) Mock：验证交互（被调用与否、参数、次数），不只是返回值
+     *      例：verify(repo, times(1)).findById(1L)
+     *   5) Spy：包装真实对象，默认走真实方法，可选择性打桩
+     *      例：@SpyBean UserService + doReturn(...).when(spy).method()
      *
-     * 二、ContextCache 在多线程/多模块 CI 中的行为
-     *   1) ContextCache 是进程级静态映射，JUnit 的并行执行模式（
-     *      JUnit5 junit.jupiter.execution.parallel.enabled=true）下并发访问
-     *   2) Spring TestContext 框架对 ContextCache 做了同步保护：
-     *      缺失的上下文会被唯一创建（computeIfAbsent），并发取到同一实例
-     *   3) 但 Bean 状态可变时并行测试仍互相干扰：
-     *      - 共享的静态计数器、单例缓存、数据库表
-     *      -> 设计上追求"可重入、可重放、可隔离"的测试
-     *   4) 解决方案分层：
-     *      a) 数据隔离：每个测试用随机用户名/前缀，事务回滚机制
-     *      b) 状态隔离：@DirtiesContext 或用不同的 @MockBean 组合
-     *         触发独立上下文（性能下降换正确性）
-     *      c) 逻辑隔离：把并发验证从集成测试剥离，单独写并发测试类
-     *
-     * 三、并发正确性的测试方法（竞态检测）
-     *   1) 压力式：起 N 个线程循环执行同一操作（如 createUser），
-     *      CountDownLatch 让所有线程同时开跑（barrier 效果）
-     *   2) 断言式：循环结束后断言总数、唯一性、状态一致性
-     *      示例骨架：
-     *      var n = 50; var start = new CountDownLatch(1);
-     *      var done = new CountDownLatch(n);
-     *      for (int i = 0; i < n; i++) { pool.submit(() -> {
-     *         start.await(); try { service.createUser(dto); } finally { done.countDown(); }});}
-     *      start.countDown(); done.await(10, TimeUnit.SECONDS);
-     *      // 断言: 数据库唯一索引外的脏数据数量应为 0
-     *   3) 可靠性问题：竞态可能不每次都出现，跑 10 次才能抓到 1 次，
-     *      CI 应把这类测试标记为 @Tag("race") 长跑而非每次都跑
-     *   4) 工具补强：jcstress、JCIP 的 ConcurrentTest 工具、
-     *      或者针对缓存用 Testcontainers 起真实 Redis 验证分布式互斥
-     *
-     * 四、ThreadLocal 清理在测试中的自检
-     *   1) 测试结束后残留的 ThreadLocal 值可能影响后续测试
-     *      （surefire 默认同线程跑所有测试方法）
-     *   2) 自检技巧：在每个测试方法末尾断言 ThreadLocal.get() == null
-     *   3) JUnit5 的 @BeforeEach 集中清理：执行链路开的每个 ThreadLocal
-     *      在 before 里 clear 一次，finally 在 after 里再 clear 一次
-     *   4) 多线程场景给测试线程也复制必要上下文：
-     *      SecurityContext/MDC 在主线程 -> 异步分支需要 TaskDecorator 复制，
-     *      测试里可用同款装饰器保证行为与生产一致
-     *
-     * 五、集成测试的三个黄金习惯
-     *   1) 每个并发敏感用例加超时（assertTimeoutPreemptively 或 awaitility）
-     *      否则死锁测试会把整个 CI 挂住
-     *   2) 异步结果必须显式等待断言完成，杜绝 submit 后立即 return
-     *   3) 共享数据随机化（UUID、纳秒时间戳），减少测试间的串扰概率
+     * 二、本类（contextLoads）用的是哪一种？
+     *   1) @SpringBootTest 拉起真实容器：UserService、UserRepository、
+     *      SecurityFilterChain 全是真实 Bean——严格说不是"替身"，
+     *      是集成测试的正兵
+     *   2) 但数据源是 Fake：dev 用 H2 内存库替代真实 MySQL
+     *      这是测试金字塔的中间层：真容器 + 假数据源
+     *   3) Fake 的价值与风险：
+     *      价值：启动快、无外部依赖、CI 可移植
+     *      风险：方言差异（H2 不等于 MySQL 的 SQL 行为/锁/索引）
+     *      生产前置环境用 Testcontainers 起 MySQL 容器更可信
+
+     * 三、替身选型的决策树
+     *   1) 需要验证"交互"（调用次数/顺序/参数）-> Mock
+     *   2) 只需要"输入数据"（状态准备）-> Stub
+     *   3) 需要轻量但可用的实现 -> Fake
+     *   4) 真实对象大部分可用，个别行为要隔离 -> Spy
+     *   5) 只需占位满足编译 -> Dummy（通常说明设计可改进）
+     *   6) 核心业务跨层正确性 -> 集成测试（少替身多真实）
      * =========================================================================
      */
 }

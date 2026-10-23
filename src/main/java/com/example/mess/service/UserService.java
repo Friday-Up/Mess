@@ -217,64 +217,38 @@ public class UserService {
 
     /*
      * =========================================================================
-     * 【Java 并发】服务层并发画像：ThreadLocal、缓存击穿与竞态修正（非可执行代码）
+     * 【设计模式】策略与代理：缓存策略解耦与 AOP 织入（非可执行代码）
      * =========================================================================
      *
-     * 一、本 Bean 的并发模型（单例 + 无字段状态 -> 基线安全）
-     *   1) 单例 UserService 在容器内只有一份实例，被所有请求线程共用
-     *   2) 本类只持有注入的 UserRepository（也是线程安全的 Bean），
-     *      方法内部变量全在调用线程栈上 -> 没有共享可变状态 -> 天然安全
-     *   3) 破坏因素：日后若加缓存字段 private Map<Long, User> memoMap = new HashMap<>();
-     *      多线程同时 put 会触发 HashMap 扩容死循环（JDK8 改为尾插虽不死循环但丢数据）
-     *      -> 必须换 ConcurrentHashMap 或显式 synchronized（下面展开）
+     * 一、策略模式（Strategy）：@Cacheable 的多实现切换
+     *   1) Spring Cache 的核心接口.Cache 抽象了 get/put/evict，
+     *      具体策略可切换：SimpleCacheManager（ConcurrentMap）、
+     *      RedisCacheManager、CaffeineCacheManager、EhCacheManager...
+     *   2) 本类只编码策略接口（注解声明 what），不绑定具体实现（how）：
+     *      @Cacheable(value="users") 在测试环境用 simple，
+     *      生产切 redis 只改配置不改代码——策略模式的核心红利
+     *   3) 三个概念分辨：Cache（策略）= 算法；CacheManager（策略工厂）
+     *      = 创建策略；@Cacheable（声明式绑定）= 用策略，职责分明
      *
-     * 二、JMM 与可见性：为什么"看似正确"却读不到新值
-     *   1) Java 内存模型：每个线程有自己的工作内存（寄存器/缓存副本），
-     *      不强制立即回写主存，也不强制立即感知他人写入 -> 可见性问题
-     *   2) 常见症状：一个线程改了 flag，另一个线程的死循环不退出
-     *   3) 保证可见性的四种手段：
-     *      - volatile：读强制刷主存，写强制回主存；但复合操作（i++）不原子
-     *      - synchronized：进入与退出块建立 happens-before 链
-     *      - final：构造期语义保证，正确构造的不可变对象对所有线程可见
-     *        （本项目的 DTO 即此模式，见 UserDto 注释块）
-     *      - 原子类：AtomicInteger.getCasAdd 保证原子且可见
-     *   4) 本类业务里需要关心可见性的点：缓存管理器内部用 ConcurrentHashMap
-     *      已处理（Spring Cache 实现保证），业务代码不必再double-check
+     * 二、代理模式（Proxy）：Spring AOP 的动态代理选择
+     *   1) 经典代理四要素：接口/目标、代理体、调用控制、透明替换
+     *   2) Spring 对本类生成代理（CGLIB 子类），调用方无感：
+     *      proxy.getUserById 在目标方法前后织入 CacheInterceptor 的通知
+     *   3) 两种代理实现的选择逻辑：
+     *      有接口且未强制 CGLIB -> JDK Proxy（反射调用）
+     *      无接口（本类）或配置 proxyTargetClass -> CGLIB（子类覆盖）
+     *   4) 与装饰器（Decorator）的本质区别：
+     *      代理强调"访问控制"（何时调用、是否缓存命中、权限），
+     *      装饰器强调"功能叠加"（BufferedReader 套 FileReader）；
+     *      AOP 代理常被称为"动态装饰"，但语义上更偏控制侧
      *
-     * 三、缓存击穿、穿透与并发回源
-     *   1) @Cacheable 的缺陷场景：某热点用户 ID 过期瞬间，100 个线程同时
-     *      miss -> 100 次 DB 查询（缓存击穿）
-     *   2) 修法一：@Cacheable(sync=true)，本地缓存（ConcurrentMapCache）
-     *      时 synchronized 锁同一 key 串行回源；Redis 缓存时只能限一个
-     *      应用实例进入，分布式场景不达标
-     *   3) 修法二：分布式互斥（Redis SETNX 或 Redisson lock），同一 key
-     *      只允许一个线程回源，其它等通知或短暂自旋
-     *   4) 修法三：逻辑过期（缓存永不过期，value 内含过期字段），
-     *      发现过期后由异步线程刷新，请求拿到旧值先返回，无阻塞
-     *   5) 雪崩防护：缓存键添加随机 TTL 抖动（如 60s + rand(10s)），
-     *      避免同一时刻大批 key 同时失效
-     *   6) 穿透防护：null 也缓存（短 TTL）或布隆过滤器前置拦截非法 ID
-     *
-     * 四、唯一性检查的并发时序（竞态与双保险）
-     *   1) 本类 createUser 的逻辑：existsByUsername 检查 -> save
-     *   2) 并发时序：线程 A 检查不存在，线程 B 同时检查也不存在，
-     *      两者先后 save 都通过应用层检查 -> 靠数据库唯一索引兜底
-     *   3) 数据库唯一约束在此是"次要防线"，应用层提前拦截是"主要防线"：
-     *      - 只有应用层：竞态时产生脏数据（唯一性被破坏）
-     *      - 只有数据库层：每次插入失败都浪费连接与异常栈开销
-     *      双保险的正确姿势：应用层先挡 -- 失败回 409（而非 500）
-     *   4) 更高要求可用 SELECT ... FOR UPDATE 悲观锁或 advisory lock 串行化
-     *      创建动作（注意事务边界，锁随事务释放）
-     *
-     * 五、@Async 与 CompletableFuture 的正确打开方式
-     *   1) 本类若把耗时分支异步化：@Async public CompletableFuture<UserDto> ...
-     *      注意：@Async 同样走 AOP 代理，同类内调用不生效（同 @Cacheable）
-     *   2) 接收方使用 .join() 等待时会占用 Tomcat 线程，与同步无差，
-     *      只有把多个异步任务分派后 .allOf 组合再返回，才真正减线程占用
-     *   3) 应对异常：CompletableFuture 的异常不会自动抛到调用方，
-     *      需 .exceptionally 或 .handle 兜底；否则异常被吞，日志只剩 silence
-     *   4) 拒绝策略选择：CallerRunsPolicy 会把任务回灌 Tomcat 线程，
-     *      看似退化但起到背压作用；生产建议 + 指标监控 + 告警
+     * 三、空对象模式（Null Object）与 Optional 的现代替代
+     *   1) 经典：定义一个"什么都不做"的 NullUser 代替返回 null，
+     *      消除调用方的 null 判空
+     *   2) 本项目用 Optional<User> 代替 NullUser：
+     *      更轻量、语义更精确（可能有值），与 Stream 天然配合
+     *   3) 何时仍需要 NullObject：当"无值时要有默认行为"
+     *      （如日志记录器默认 NoOpLogger）比 Optional 表达更清晰
      * =========================================================================
      */
 }

@@ -220,56 +220,37 @@ class UserControllerTest {
 
     /*
      * =========================================================================
-     * 【Java 并发】Controller 切片测试的线程心智与竞态点定位（非可执行代码）
+     * 【设计模式】Mock 模式：验证交互而非状态（非可执行代码）
      * =========================================================================
      *
-     * 一、@WebMvcTest 的线程边界
-     *   1) 切片测试裁剪了 Bean，但没裁剪线程模型：执行仍在测试主线程，
-     *      单线程串行执行每个 @Test 方法
-     *   2) @MockBean 是线程安全依赖：Mockito 代理对所有线程暴露同一
-     *      stub 注册表（内部 ConcurrentHashMap），但并发的 when().thenReturn
-     *      配置会互相覆盖 -> 测试方法的 stub 定义应在测试开始前完成，
-     *      不要在执行中动态改 stub
-     *   3) MockMvc 同前述：单线程契约测试专用；并发场景不开 @WebMvcTest
+     * 一、Mock 与 Stub 的混用：本类的双重身份
+     *   1) 本类对 Service 是 Stub（thenReturn 打桩提供输入）
+     *   2) 但涉及安全上下文（@WithMockUser）和 HTTP 层时，
+     *      某些场景需要验证交互（例如"是否正确调用了 DELETE"）
+     *   3) 交互验证的典型形态：
+     *      verify(service, times(1)).deleteUser(1L);
+     *      验证 controller 路由后调用了 service 且传参正确
      *
-     * 二、竞态点在 MVC 链路中的可能性地图
-     *   1) 路由匹配：启动期注册到 urlLookup（ConcurrentHashMap 写一次），
-     *      运行期只读 -> 无并发风险
-     *   2) 参数绑定：HandlerMethodArgumentResolver 复用实例，多数实现
-     *      无状态；但自定义解析器若缓存了请求相关数据到字段就危险
-     *   3) 拦截器：preHandle 并发执行，字段若记录"上次请求"即有可见性问题
-     *   4) 序列化：HttpMessageConverter 是单例无状态，ObjectMapper
-     *      配置后线程安全（如 Jackson 的 SerializerCache 并发安全）
-     *   5) 控制器字段：最常见的盲区，见 HelloController 注释块第二节
-     *   6) 业务线程切换：Controller -> Service 若引入 @Async/@Transactional
-     *      的组合，ThreadLocal 传播链路成为最大不确定点
+     * 二、Mock 的"交互契约"思想
+     *   1) Mock 让被测类的依赖行为成为可断言对象，
+     *      等价于为"调用链"写契约：这层该调谁、调几次、传什么
+     *   2) 项目中适合 Mock 的点（用 verify 而非只断言输出）：
+     *      a) 删除场景：是否真的调了删除方法（而非仅返回 200）
+     *      b) 分页参数：是否把 page/size 正确传给下层
+     *      c) 幂等场景：重复请求只应触发一次真实调用
+     *   3) 过度 Mock 的反面教材：每个 if 分支都 verify，
+     *      把测试钉死在实现细节——重构一次全红
+     *   4) 经验比例：交互验证点占全部断言 < 30% 为宜，
+     *      其余靠状态/输出断言保持稳定
      *
-     * 三、本类测试方法在做什么线程相关动作
-     *   1) 给定：@MockBean service 返回预置值（单线程 stub，无竞争）
-     *   2) 执行：mockMvc.perform(...) 一次请求（单线程 -> 无竞争）
-     *   3) 断言：andExpect 检查响应体与状态码（同一主线程，结果已固化）
-     *   4) 结论：本类主要为"契约测试"，并发风险不在此层暴露；
-     *      真竞态点在 Service 层缓存与数据库唯一约束（UserService 块）
-     *
-     * 四、并发测试的移植建议
-     *   1) 竞态场景用 @SpringBootTest + 真实线程池编排：
-     *      注入实际的 TaskExecutor（与生产同款配置）而非测试专用池
-     *   2) 断言辅助：awaitility 库 (await().atMost(5, SECONDS).until(...))
-     *      处理异步完成的轮询，避免 sleep 硬编码
-     *   3) 边界值化：并发线程数覆盖 1、中值、连接池上限、池上限+1，
-     *      尤其"上限+1"能抓到池耗尽的显式异常路径
-     *   4) 失败重跑机制：并发测试偶发失败，CI 设置 retry 一次并标记
-     *      @Tag("flaky-race")_观察趋势，警惕"重跑即绿"掩盖真问题
-     *   5) 监控指标接入：把压测数据回投 Micrometer 埋点，
-     *      吞吐/线程池水位与 RT 一起看才能定位是业务瓶颈还是排队瓶颈
-     *
-     * 五、Beyond 框架：并发测试的能到多深
-     *   1) 协议级：单线程结果一致可验证"幂等性与线程无关"的逻辑；
-     *      真正的幂等需跨线程重复提交同一请求（同 requestId）
-     *   2) 隔离级别级：@Transactional(readOnly=false) 并发测试需配合
-     *      TransactionTemplate 或编程式事务制造明确的提交时机
-     *   3) 系统级：超过应用层后进入数据库行锁、MVCC 行为的验证范围，
-     *      这类用集成测试 + 真实数据库（Testcontainers）才可信
+     * 三、参数捕获器（ArgumentCaptor）：Mock 的进阶武器
+     *   1) 捕获传给 mock 的参数，事后断言内容：
+     *      var captor = ArgumentCaptor.forClass(Long.class);
+     *      verify(service).deleteUser(captor.capture());
+     *      assertEquals(1L, captor.getValue());
+     *   2) 与 verify(service).deleteUser(1L) 的区别：
+     *      后者只检查"传的是 1L"，前者捕获后可做复杂断言
+     *      （如多字段 DTO 的部分匹配、大小关系等）
      * =========================================================================
      */
 }

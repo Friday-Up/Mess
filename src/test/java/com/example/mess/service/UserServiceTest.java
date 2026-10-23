@@ -194,56 +194,38 @@ class UserServiceTest {
 
     /*
      * =========================================================================
-     * 【Java 并发】纯 Mockito 单测的线程视角、时间控制在竞态验证中的角色（非可执行代码）
+     * 【设计模式】Fake vs Mock vs Stub 的最终抉择：本类的纯正性（非可执行代码）
      * =========================================================================
      *
-     * 一、本类测试的线程模型
-     *   1) 本类不拉起 Spring 容器 -> 只有测试主线程，无后台线程，
-     *      每个 @Test 方法串行执行，毫秒级返回
-     *   2) @Mock/@InjectMocks 生成的代理只涉及字节码增强（CGLIB/Mockito
-     *      ByteBuddy），不存在线程池、锁、ThreadLocal 传播的概念
-     *   3) 推论：本类覆盖的是"业务逻辑正确性"，与并发风险正交；
-     *      缓存的 @Cachable 生效行为、事务回滚、SecurityContext 传播
-     *      都不在本类测试范围，需上层集成测试补位
+     * 一、本类的替身归类
+     *   1) @Mock UserRepository：是 Stub（thenReturn 提供数据）
+     *      也是 Mock（verify 验证调用），两种用途并存
+     *   2) 与控制器测试的差异：本类更偏 Mock——
+     *      Service 层的业务规则依赖"调用 Repository 的方式"，
+     *      如"先 existsByUsername 再 save"，
+     *      这类逻辑只能用 verify 或实际效果推断
+     *   3) 结论：Service 是"逻辑中枢"，Controller 是"转发门户"，
+     *      测试替身权重：Service 层 Mock 占比应高于 Controller 层
      *
-     * 二、Mockito 在多线程下的限制（若强行添加并发断言）
-     *   1) Mockito 的 stub 验证器不是为并发设计：同一 mock 的
-     *      when().thenReturn() 配置是共享注册表，多线程同时配置会互相覆盖
-     *   2) verify(times(n)) 的计数器虽是原子的（AtomicInteger），
-     *      但"恰好在某 verify 时别的线程正调用"时序不定 -> flaky
-     *   3) 官方建议：mock 配置在测试启动时定死、调用期间不动，
-     *      断言区域再读计数；需要验证竞态正确性请改用真实现而非 mock
+     * 二、Fake 数据源在本项目的深层应用
+     *   1) 本类虽不用 Fake，但与 @DataJpaTest 的配合值得知晓：
+     *      @DataJpaTest 用 H2（Fake MySQL）跑真 Repository，
+     *      无需 mock，验证"派生方法是否输出正确 SQL"
+     *   2) Fake 的成本：H2 与 MySQL 的行为差异（类型/函数/索引）
+     *      可能造出"测试绿、生产红"。
+     *   3) 修正方案：Testcontainers 真实 MySQL 容器 + @DataJpaTest，
+     *      是集成测试层的终极可信替换，CI 每日跑一次（慢但真）
+     *   4) 决策原则：Fake 保证速度（开发频繁跑），
+     *      Mock 保证解耦（单元快测），真库保证保真（关键路径覆盖）
      *
-     * 三、时钟与时序控制的边界
-     *   1) 本类若涉及时间（createdAt），LocalDateTime.now() 只要在主线程
-     *      同步调用就确定（不含时区/并发问题）
-     *   2) 想控制时间做"过期/计时"逻辑测试：
-     *      - 注入 Clock Bean（生产 code 调 clock.instant()），测试里
-     *        用 Clock.fixed(...) 便无需修改代码结构
-     *      - 不要在生产代码里散落 LocalDateTime.now()，否则时间不可注入
-     *   3) 异步测试的等待：本类是同步方法，无需等待；一旦给 Service
-     *      加 @Async 返回 CompletableFuture，单测必须用 timeout +
-     *      join 显式等待，否则测试方法早于 future 完成而断言通过假绿
-     *
-     * 四、竞态与契约在单测中的分别处理
-     *   1) 单测回答"给定输入是否产出预期输出"（契约）
-     *   2) 集成测试回答"多线程同时操作时结果是否仍符合预期"（竞态）
-     *   3) 两层测试工具/范围清晰分层才能快速反馈：
-     *      - 单测毫秒级、随时跑
-     *      - 并发测试秒级、CI 夜间跑 + 上线前跑
-     *   4) 对本 Service 的高价值竞态用例：createUser 在 N 个线程同时
-     *      提交相同 username，断言仅一条成功（数据库唯一约束兜底）
-     *      与 getOrCreate 语义的"恰好一次创建"
-     *
-     * 五、并发测试之外的静态防线
-     *   1) 代码审查清单：Service/Controller 字段是否可变、是否有
-     *      ThreadLocal 未清、非线程安全集合是否逃逸到单例字段
-     *   2) 静态分析工具：SpotBugs/FindSecBugs 检测常见并发反模式
-     *      （如 LazyInit 非同步、Double-checked 无 volatile）
-     *   3) 运行期观测：Micrometer 上报线程池 active/idle/queue，
-     *      异常的线程池水位本身就是并发设计问题的先行信号
-     *   4) 所有静态手段都不能替代"并发场景下真实执行"的检验，
-     *      本类现阶段的快速反馈 + 集成层的真实执行是最小完备的组合
+     * 三、替身与真实实现的协同测试矩阵
+     *   层次：单元层（纯 Mockito）-> 切片层（@WebMvcTest/@DataJpaTest）
+     *        -> 集成层（@SpringBootTest + Fake Bean）-> 端到端（真库容器）
+     *   替身：Mock/Stub（快）-> Spy/@MockBean（中）-> Fake H2（中）
+     *        -> Testcontainers（慢）
+     *   频率：每次提交（快）-> 每次 PR（中）-> 每日/上线前（慢）
+     *   本类定位：单元层快测，为集成层减负，
+     *      集成测试只补本类测不到的框架行为（缓存/事务/AOP）
      * =========================================================================
      */
 }

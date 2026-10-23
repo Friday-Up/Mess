@@ -173,57 +173,40 @@ public class UserController {
 
     /*
      * =========================================================================
-     * 【Java 并发】控制层并发画像：从请求线程到响应线程的全链路（非可执行代码）
+     * 【设计模式】适配器与模板方法：HandlerAdapter 与 DispatcherServlet 流水线（非可执行代码）
      * =========================================================================
      *
-     * 一、一次 GET /api/users/1 牵涉到哪些线程
-     *   1) Tomcat 工作线程（Thread-1）：全程贯穿
-     *      HandlerMapping 匹配 -> HandlerAdapter 调用本类方法 -> Service ->
-     *      Repository -> JdbcTemplate/Hibernate -> DB IO（阻塞同步等待）
-     *   2) HikariCP 连接池的借用线程：工作线程从池里 acquire 连接，
-     *      借用期间工作线程阻塞（不是 Hikari 的线程在执行业务 SQL），
-     *      连接池线程只负责建连接与清理空闲连接
-     *   3) MySQL 驱动的 IO 线程：请求发出后工作线程在 socket 上 read 阻塞，
-     *      直到驱动收完结果集才被唤醒
-     *   4) 结论：串行链路把 200 个工作线程按"下游延迟"成倍放大：
-     *      DB 平均 200ms，每线程 5 QPS，200 线程理论上限 1000 QPS
-     *      （任何一层 RT 抖动都会让工作线程成批阻塞，崩点是超时无响应）
+     * 一、适配器模式（Adapter）在 MVC 的核心位置
+     *   1) 问题：Handler 的形态多样（@RequestMapping 注解方法、
+     *      Controller 接口实现、RouterFunction、HttpRequestHandler），
+     *      DispatcherServlet 不能写 N 个 if-else 分别调用
+     *   2) 解法：引入 HandlerAdapter 接口统一调用面：
+     *      boolean supports(Object handler);
+     *      ModelAndView handle(HttpServletRequest, Object handler);
+     *   3) DispatcherServlet.getHandlerAdapter 遍历已注册适配器，
+     *      由 supports 决定归属：本类 @RequestMapping 方法归属
+     *      RequestMappingHandlerAdapter
+     *   4) 价值：新增 Handler 类型只需新增 Adapter，DispatcherServlet
+     *      零改动——对扩展开放、对修改关闭（OCP 的教科书实现）
+
+     * 二、适配器的"双向"形态
+     *   1) 类适配器（继承）：被适配者的子类 + 实现目标接口
+     *   2) 对象适配器（组合）：持有一个被适配者的引用（Spring 选这条）
+     *   3) RequestMappingHandlerAdapter 组合了 HandlerMethodArgumentResolver/
+     *      returnValueHandler/Converter 等子系统，它是"复合适配器"
+     *   4) 判断要点：适配器不改被适配者行为，只换调用协议
+     *      若改了行为更像装饰器（Decorator）见 Service 层的代理块
      *
-     * 二、控制层共享状态的边界
-     *   1) 本类只装配了 Service 与 DTO 转换的入参，全部无状态 -> 安全
-     *   2) 常见越界行为与后果：
-     *      - 在方法外 new SimpleDateFmt 作为字段：SimpleDateFmt 非线程安全，
-     *        格式化结果错乱甚至抛异常；改用 DateTimeFormatter（不可变）
-     *      - 用 ArrayList 做入参收集并缓存到字段：可见性与覆盖问题
-     *   3) 请求级缓存可用 @Scope(WebApplicationContext.SCOPE_REQUEST) 的 Bean，
-     *      Spring 为每个请求新建实例，结束即销毁，无thread 竞争
-     *   4) 会话级数据用 @Scope(SCOPE_SESSION)；跨请求共享才落到单例 +
-     *      并发容器或显式同步
-     *
-     * 三、ThreadLocal 在请求链路中的真实落点
-     *   1) Spring 的事务管理：TransactionSynchronizationManager 用多个
-     *      ThreadLocal（connectionHolder/isReadOnly/name）绑定数据库连接
-     *   2) Security 上下文：SecurityContextHolderStrategy 的 ThreadLocal
-     *      携带 Authentication（见 SecurityConfig 注释块）
-     *   3) MDC 链路追踪：Logback 的 MDC Map 是 ThreadLocal，基于
-     *      traceId 串联日志（本类 logにも自动注入？需配置 layout）
-     *   4) 三者都可能因线程复用泄漏：
-     *      - 事务：TransactionInterceptor 在 finally 里清理，安全
-     *      - Security：SecurityContextHolderFilter 请求结束清理，安全
-     *      - MDC：需要自己在 Filter/Interceptor 里 clear，任何一处漏掉
-     *        就会在压测中看到"上一次请求的 traceId 跑到下次"，经典脏数据
-     *
-     * 四、控制层压测与并发的自检清单
-     *   1) 并发线程数应 <= maxThreads+acceptCount，否则压测先压 Tomcat 排队
-     *      （排队带来的 RT 上升会掩盖业务瓶颈）
-     *   2) 观察工作线程池水位：jvisualvm 或 /actuator/metrics/tomcat.threads.busy
-     *      busy 接近 max 时先看下游（DB/第三方）耗时，而不是加线程
-     *   3) 切换点：CPU 飙高但 DB 慢查询少，通常是序列化/正则/大对象拷贝，
-     *      异步化并不能救，先做 CPU profile（async-profiler 生成火焰图）
-     *   4) 接口幂等性：并发重试会触发两次创建 -> 详见 UserService 唯一性
-     *      检查与数据库唯一约束的双保险设计
-     *   5) 超时兜底：Tomcat 的 connectionTimeout 与下游客户端超时应
-     *      层层递减（Tomcat > Service > Remote Client），形成漏斗
+     * 三、模板方法模式（Template Method）：HttpServlet 的骨架
+     *   1) javax.servlet.http.HttpServlet 的 service() 为骨架方法：
+     *      service(req, resp) 内部按 method 分派到 doGet/doPost/doPut...
+     *   2) FrameworkServlet（Spring 的扩展）覆盖 service 完成字符编码、
+     *      locale、RequestContextHolder 设置，再调用 doService（抽象步骤）
+     *   3) DispatcherServlet.doDispatch 是最终的模板方法：
+     *      getHandler -> getAdapter -> handle -> resolveException，
+     *      每一步都是可被子类覆盖的受保护方法
+     *   4) 项目启示：模板方法识别口诀——"流程固定、步骤可变"，
+     *      写代码遇到此类场景，先抽骨架再留扩展点比塞 if-else 稳健
      * =========================================================================
      */
 }

@@ -148,58 +148,43 @@ public class User {
 
     /*
      * =========================================================================
-     * 【Java 并发】实体可变状态的线程安全与 JMM 可见性（非可执行代码）
+     * 【设计模式】实体与建造者模式：贫血模型的红利与代价（非可执行代码）
      * =========================================================================
      *
-     * 一、本实体在运行时的线程分布
-     *   1) 本实体是"事务内临时对象"的典型：加载数据后委托给当前请求线程，
-     *      事务结束随持久化上下文清理，通常不跨线程共享
-     *   2) 一旦脱离事务（如推送消息、异步任务、缓存存对象引用），
-     *      实体对象会被多个线程同时看到，setUsername 与 getUsername 可能并发：
-     *      写线程 set 后，读线程下一行可能仍读到旧值（可见性问题的实体版）
-     *   3) 实体字段为 String/Long/LocalDateTime，单个引用赋值是原子的，
-     *      但"用户名变更 + 邮箱变更"的复合写并非原子，读方可能看到
-     *      新用户名 + 旧邮箱的组合 -> 业务语义的中间态
+     * 一、贫血模型（Anemic Domain Model）的反模式定位
+     *   1) 本类只有字段 + getter/setter，业务逻辑全部外置到
+     *      UserService——这是 Fowler 批评的贫血模式
+     *   2) 为什么 Spring 项目普遍贫血？务实定位：
+     *      - 技术约束：JPA 实体被代理（CGLIB）、字段会被反射，
+     *        "充血"（实体带行为）与框架的契合度有缝隙
+     *      - 团队习惯：服务层写逻辑、实体只做映射，简单直接
+     *   3) 充血改造成本评估：把 setUsername 换成 rename(newName) 这种
+     *      领域方法后，调用方语义更准，但违反"实体只承载数据"的环境
+     *      习惯，迁移需要团队共识，非纯技术决策
      *
-     * 二、synchronized 与 Lock 的适用场景对比
-     *   1) synchronized 方法/块：JVM 内建，获取与释放由编译器保证，
-     *      异常时自动释放，简单够用；不可中断、不可超时、非公平
-     *   2) ReentrantLock：可中断（lockInterruptibly）、可超时（tryLock）、
-     *      可公平（FairSync）、可与 Condition 配合精细唤醒；必须 finally unlock
-     *   3) 本实体相关的场景：若要在内存中维护"用户变更榜单"这种共享结构，
-     *      高竞争时 ReentrantLock 性能更平稳；一般竞争 synchronized 即可
-     *   4) 误区：给 setter 加 synchronized 并不能解决可见性问题以外的
-     *      语义原子性 -> 外部调用方仍是"先 set 再 get"，需要把复合操作
-     *      封装到一个同步方法里（单一同步点），才真正解决问题
-     *
-     * 三、volatile 与实体的对齐
-     *   1) volatile 保证可见性与单变量读写顺序，不保证复合原子性：
-     *      private volatile boolean dirty; 适合做"标记位"（停机、脏标记）
-     *   2) 若本实体作为共享的缓存对象（如"用户在线状态表"），
-     *      字段加 volatile 可避免读线程缓存旧值，但仍有复合中间态问题
-     *   3) 更稳的做法：把可变实体按业务场景改造为不可变 DTO 再共享
-     *      （copy-on-write），写入方换整个对象引用，读取方拿到一致的快照
-     *   4) 实体与 DTO 的分界在此点体现价值：实体留在事务线程内（可变），
-     *      DTO 泛滥并发场景（不可变），见 UserDto 注释块
-     *
-     * 四、Long、String、时间类型的并发友好性
-     *   1) String：不可变，多线程只读安全；唯一的坑是 interned/substring
-     *      内容大时内存放大（老 JDK），现代 JDK substring 拷贝很安全
-     *   2) Long：对象引用赋值原子（32 位 JVM 上 long/double 例外），
-     *      一般无需 volatile；但 Long 的 hashCode 缓存是惰性写入的可变状态，
-     *      重复计算安全（幂等），不构成风险
-     *   3) LocalDateTime：不可变，内部状态固定，天然线程安全；
-     *      老代码常见 Date 是可变且非线程安全，跨线程传递 Date 必须防御拷贝
-     *   4) 集合字段是最大隐患：List/Set/Map 在实体里做值对象时，
-     *      应构造时定死并返回不可变视图（List.copyOf / unmodifiableList）
-     *
-     * 五、对象发布与逸出的最小规则
-     *   1) 不要在构造器中启动线程并传 this（this 逸出，半成品对象被读到）
-     *   2) 不要在构造器中注册回调并共享 this（同上，改为 init 方法或工厂后注册）
-     *   3) 单例 Bean 持有实体集合：集合本身用并发容器，条目仍可能被并发 set
-     *      -> 选型：要么不可变条目 + 并发容器，要么整体加同步
-     *   4) 日志打印实体时：对象被其他线程改动会出现"打印时的状态不是
-     *      逻辑时刻的状态"，测试报告里偶现的诡异值往往源于此
+     * 二、建造者模式（Builder）：UserService 中 convertToEntity 的场景
+     *   1) 经典 Builder： User.builder().username(x).email(y).build()
+     *      比构造函数爆炸 new User(id?, username, email?, name?, createdAt?)
+     *      更安全（不会参数对调）、更可读
+     *   2) 本项目的替代：convertToEntity 用 setter 链搭起对象，
+     *      虽不是 Builder 类，但意图接近——只是没把过程封装
+     *   3) 实施路径（低成本迁移）：
+     *      a) 给 User 加 Lombok @Builder（注解即得）
+     *      b) Service 装配改为 User.builder().username(x).build()
+     *      c) 保持 Entity 构造私有以强制走 Builder（渐进推进）
+     *   4) 建造者 vs 多参构造的判定：
+     *      参数 ≥ 4、参数同类型、部分可选 -> 选 Builder；
+     *      参数 ≤ 2 且必填 -> 构造函数更直接
+
+     * 三、值对象（Value Object）与实体的本体差异
+     *   1) 实体（本类）：身份由 id 标识，同 id 不同状态仍是同一个 User
+     *   2) 值对象：无身份，全部字段相等即相等（如 Money/Address），
+     *      应实现 equals/hashCode 且不可变
+     *   3) 项目启示：若未来给 User 加 EmailAddress/Money 这种
+     *      值对象字段，务必实现 equals（否则 Map/Set 语义崩坏），
+     *      并考虑 @Embeddable 让 JPA 正确持久化
+     *   4) equals/hashCode 的 JPA 坑：用 id 做 equals 在保存前后
+     *      状态跳变（null -> 1）；用业务键（username）更稳
      * =========================================================================
      */
 }
