@@ -56,39 +56,58 @@ class MessApplicationTests {
 
     /*
      * =========================================================================
-     * 【设计模式】测试替身总览：Dummy/Stub/Fake/Mock/Spy 五兄弟（非可执行代码）
+     * 【HTTP/REST】集成测试中的 HTTP 契约验证（非可执行代码）
      * =========================================================================
      *
-     * 一、测试替身（Test Double）的谱系（Gerard Meszaros 定义）
-     *   1) Dummy：只满足签名，从不被实际使用
-     *      例：new User(null, null, null, null, null) 只为编译通过
-     *   2) Stub：预置返回值，让被测类得到必要输入
-     *      例：when(repo.findById(1L)).thenReturn(Optional.of(user))
-     *   3) Fake：有真实简化实现，但不能用于生产
-     *      例：用 H2 内存库替代 MySQL——本项目正是此路
-     *   4) Mock：验证交互（被调用与否、参数、次数），不只是返回值
-     *      例：verify(repo, times(1)).findById(1L)
-     *   5) Spy：包装真实对象，默认走真实方法，可选择性打桩
-     *      例：@SpyBean UserService + doReturn(...).when(spy).method()
-     *
-     * 二、本类（contextLoads）用的是哪一种？
-     *   1) @SpringBootTest 拉起真实容器：UserService、UserRepository、
-     *      SecurityFilterChain 全是真实 Bean——严格说不是"替身"，
-     *      是集成测试的正兵
-     *   2) 但数据源是 Fake：dev 用 H2 内存库替代真实 MySQL
-     *      这是测试金字塔的中间层：真容器 + 假数据源
-     *   3) Fake 的价值与风险：
-     *      价值：启动快、无外部依赖、CI 可移植
-     *      风险：方言差异（H2 不等于 MySQL 的 SQL 行为/锁/索引）
-     *      生产前置环境用 Testcontainers 起 MySQL 容器更可信
+     * 一、contextLoads 在契约视角意味着什么
+     *   1) 容器能起来 = 全部 Bean 装配满足约束：路由/依赖/配置一致
+     *   2) 不等于 HTTP 契约正确：可能路由注册了但响应体格式错
+     *      ——本类不请求任何端点，纯容器级验证
+     *   3) REST 契约的最小覆盖矩阵（项目建议补强）：
+     *      a) 每个公开端点至少 1 个 happy path 用例（2xx + 包体结构断言）
+     *      b) 每个业务异常路径至少 1 个用例（4xx + errorCode）
+     *      c) 鉴权失败 1 个（401/403）
+     *      d) 参数校验失败 1 个（400）
+     *      e) 路由不存在 1 个（404 + 路由不存在 errorCode）
+     *   4) 集成层跑真容器 + 真数据库（H2）——契约的"端到端"维度最接近生产
 
-     * 三、替身选型的决策树
-     *   1) 需要验证"交互"（调用次数/顺序/参数）-> Mock
-     *   2) 只需要"输入数据"（状态准备）-> Stub
-     *   3) 需要轻量但可用的实现 -> Fake
-     *   4) 真实对象大部分可用，个别行为要隔离 -> Spy
-     *   5) 只需占位满足编译 -> Dummy（通常说明设计可改进）
-     *   6) 核心业务跨层正确性 -> 集成测试（少替身多真实）
+     * 二、HTTP 契约的断言层次
+     *   1) 状态码断言：最外层结果语义（is2xxSuccessful / is4xxClientError）
+     *   2) 头断言：Content-Type / X-Request-Id / Location / Cache-Control 等
+     *   3) 包体结构断言：jsonPath 逐字段（$.success / $.data.username / $.timestamp）
+     *   4) 包体语义断言：值等于预期（email.equals("a@x.com")）
+     *   5) 不变量断言：每次响应 timestamp 格式都是 ISO8601
+     *      ——契约的"格式稳定性"测试，防格式漂移
+     *   6) 本项目 ApiResponse 的统一格式让断言模板化：
+     *      所有 2xx 断言("$.success").value(true) + data 结构可复用
+
+     * 三、契约测试与单元测试的分界
+     *   1) 单元层（Mockito）：业务规则正确性（"用户名重复时抛异常"）
+     *   2) 集成层（本类 + MockMvc）：HTTP 协议正确性
+     *      （"404 状态码 + 包体有 success=false + errorCode 字段存在"）
+     *   3) 端到端层（TestRestTemplate + RANDOM_PORT）：
+     *      真实网络栈验证（TCP/序列化/TLS）——
+     *      测"响应 Content-Length 与实际 body 一致"这类框架行为
+     *   4) 契约稳定性回归：响应体加了新字段不应让旧断言失败
+     *      ——用 jsonPath 的 hasJsonPath 而非严格 equals 兼容加字段
+
+     * 四、消费者驱动契约测试（CDC）简介
+     *   1) 思想：服务端 API 的真正责权利由消费者（前端/其他服务）定义
+     *   2) 工具：Pact / Spring Cloud Contract——消费者先写"我期望的契约"，
+     *      生成 pact 文件；服务端 CI 跑契约验证，破坏契约即失败
+     *   3) 价值：服务端"删除字段"前能预测前端哪些用例会红
+     *   4) 本项目演进起点：先把内部 API 文档（OpenAPI/Swagger）信息化，
+     *      再考虑引入 CDC——团队规模小可以先文档约定
+
+     * 五、HTTP 契约测试的反模式清单
+     *   1) 只断言 200：状态码对不代表包体对；包体字段错客户就崩
+     *   2) 断言字段顺序：JSON 字段无序——用字段名访问，必火
+     *   3) 测试中硬编码时间：timestamp 是动态的，
+     *      断言格式与相对差（now - 5s < timestamp < now + 5s）
+     *   4) 不验证错误响应的脱敏：错误包体测试里也断言不含 password 等
+     *      ——把安全契约纳入测试
+     *   5) 共享状态：测试间 DB 数据互相污染——每个用例独立构造数据
+     *      或用 @Transactional 自动回滚
      * =========================================================================
      */
 }

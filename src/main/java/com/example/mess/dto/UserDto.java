@@ -123,40 +123,60 @@ public class UserDto {
 
     /*
      * =========================================================================
-     * 【设计模式】数据传输对象与不可变值对象：边界防御的一层（非可执行代码）
+     * 【HTTP/REST】DTO 作为 API 契约的字段规范与演进策略（非可执行代码）
      * =========================================================================
      *
-     * 一、数据传输对象（DTO）：企业应用模式的边界哨兵
-     *   1) 模式定位：进程/层之间传递数据的载体，目的有三：
-     *      a) 减少远程调用次数（把多个分散字段打包成一次请求）
-     *      b) 隐藏领域模型内部结构（Entity 不外漏）
-     *      c) 匹配客户端需要的视图裁剪（只暴露必要字段）
-     *   2) 本项目兑现：
-     *      - Entity User（含 JPA 注解、可能含 ORM 状态）不直接出 API
-     *      - UserDto 裁剪字段、去 ORM 化，序列化安全
-     *      - 一次 POST /api/users 带 UserDto 即完成以往多次调用
-     *   3) 常见误解：DTO ≠ ViewModel ≠ BO，它们服务不同方向：
-     *      DTO 服务传输层，VM 服务表现层，BO 服务业务层
-     *
-     * 二、值对象（Value Object）在 DTO 上的应用潜力
-     *   1) 严格意义上本类是"可变 POJO"（有 setter），非真值对象
-     *   2) 升级为值对象/record 的收益（见并发注释块再述）：
-     *      - 天然线程安全（字段 final、构造定型）
-     *      - equals/hashCode 由编译器生成，语义正确
-     *      - 反序列化走 canonical 构造（Jackson 2.12+）
-     *   3) 受限点：与 ModelMapper/MapStruct 兼容需验证；
-     *      动态属性场景（@ConfigurationProperties）不适合 record
+     * 一、DTO 是契约的"法律文本"
+     *   1) 字段 = 条款：客户端按字段编程，服务端按字段保证语义
+     *   2) 类型 = 解释：Long id 类型即承诺"数字、可能大、不是字符串"
+     *   3) Null 语义：每个字段需明确"可空吗？空时表示什么？"
+     *      缺乏 null 语义文档是客户端 NPE 的高发源头
+     *   4) 顺序无关：JSON 字段顺序不应被客户端依赖（规范未保证），
+     *      测试断言要用字段名访问而非位置索引
 
-     * 三、装配对象的模式选择：手工 vs 反射 vs 生成器
-     *   1) 本项目 UserService.convertToDto 是手工装配：
-     *      优点：直观、无反射开销、出错点可读；
-     *      缺点：字段多时样板代码膨胀，漏字段编译器不报警
-     *   2) 备选：MapStruct（编译期生成映射代码，性能等同手工，
-     *      类型安全，漏字段有 WARNING 可强制报告）
-     *   3) 再备选：反射工具（BeanUtils/ModelMapper），运行时灵活但：
-     *      弱类型（编译期不检查）、性能差、隐式匹配规则易出 Bug
-     *   4) 项目决策：字段 < 10 选手工（当前版本）；
-     *      DTO 增长到 20+ 或出现拆分层时切换 MapStruct
+     * 二、字段层面的八条 REST 规范（本类体检）
+     *   1) 命名 camelCase ✓（id/username/email/name/createdAt）
+     *   2) 只读字段服务端回填，忽略客户端输入 ✓（createdAt 已在 setter 中防御）
+     *   3) 不暴露内部主键代替代业务键？本项目直接暴露 id 可接受（见 User 块）
+     *   4) 枚举字段值用字符串（"ACTIVE"）而非数字 1/2——契约可读性
+     *   5) 时间 ISO 8601 ✓（LocalDateTime + Jackson 默认输出）
+     *   6) 不嵌套过多层：两层已是上限（DTO 内含 AddressDto 可以）
+     *   7) 拒绝冗余字段：能从已有字段计算出的不重复暴露（age 可由 birthday 算）
+     *   8) 拒绝动词字段：DTO 字段应全是"数据"，不含"动作指令"语义
+
+     * 三、字段演进的三条安全规则（向兼容）
+     *   1) 加字段：安全——旧客户端忽略未知字段（Jackson 默认行为）
+     *   2) 改字段类型：不安全——旧客户端反序列化失败，必须新版本接口
+     *   3) 删字段：破坏性——先标 @Deprecated + 文档，至少一个版本周期
+     *      再下线；硬删会让旧客户端启动崩溃
+     *   4) 必填变可选 / 可选变必填：必填变可选安全；可选变必填破坏性
+     *   5) 实践：DTO 加 jsonSchema 描述或 Swagger @Schema(description=...)
+     *      把契约文档化，OpenAPI 文档从代码生成（见 Swagger 配置）
+
+     * 四、请求 DTO 与响应 DTO 的分界（项目演进参考）
+     *   1) 本类"一身两职"（创建请求 + 查询响应），小项目可接受
+     *   2) 中等规模后拆分：
+     *      UserCreateRequest（POST body：username/email/password——不含 id/createdAt）
+     *      UserUpdateRequest（PUT body：可改字段）
+     *      UserResponse（GET body：id/username/email/name/createdAt——不含 password）
+     *   3) 拆分收益：
+     *      a) 校验注解按请求场景分别配（Create 加 @NotNull id 预填校验）
+     *      b) 防止"响应里把创建才有的字段也带出"
+     *      c) 文档与客户端生成代码更准
+     *   4) 拆分代价：类数量 +2，转换方法 +2——规模小不值，规模大必须
+
+     * 五、序列化与反序列化的契约细节
+     *   1) Jackson 默认按 getter 序列化、setter 反序列化——字段命名跟 Java
+     *   2) 未知字段：默认反序列化抛错，配置 FAIL_ON_UNKNOWN_PROPERTIES=false
+     *      让客户端可发送"含未知字段"的请求（未来兼容）——本项目 application.yml 已配
+     *   3) 日期序列化：默认 timestamps 数字（毫秒），建议配置
+     *      spring.jackson.serialization.write-dates-as-timestamps=false
+     *      输出 ISO 字符串（人类可读、跨语言解析一致）
+     *   4) 数字精度：Long 大于 2^53 时 JS 精度丢失（id 到 9007199254740993 后）
+     *      解法：序列化为字符串（@JsonSerialize(using=ToStringSerializer.class)）
+     *      在雪花 ID 场景必修——自增 id 暂不涉及但必须提前评估
+     *   5) 编码：UTF-8 全链路（Content-Type: application/json;charset=UTF-8），
+     *      防乱码——本项目默认配置已是
      * =========================================================================
      */
 }

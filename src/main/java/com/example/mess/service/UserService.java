@@ -217,38 +217,59 @@ public class UserService {
 
     /*
      * =========================================================================
-     * 【设计模式】策略与代理：缓存策略解耦与 AOP 织入（非可执行代码）
+     * 【HTTP/REST】业务逻辑与 HTTP 契约的边界划分（非可执行代码）
      * =========================================================================
      *
-     * 一、策略模式（Strategy）：@Cacheable 的多实现切换
-     *   1) Spring Cache 的核心接口.Cache 抽象了 get/put/evict，
-     *      具体策略可切换：SimpleCacheManager（ConcurrentMap）、
-     *      RedisCacheManager、CaffeineCacheManager、EhCacheManager...
-     *   2) 本类只编码策略接口（注解声明 what），不绑定具体实现（how）：
-     *      @Cacheable(value="users") 在测试环境用 simple，
-     *      生产切 redis 只改配置不改代码——策略模式的核心红利
-     *   3) 三个概念分辨：Cache（策略）= 算法；CacheManager（策略工厂）
-     *      = 创建策略；@Cacheable（声明式绑定）= 用策略，职责分明
-     *
-     * 二、代理模式（Proxy）：Spring AOP 的动态代理选择
-     *   1) 经典代理四要素：接口/目标、代理体、调用控制、透明替换
-     *   2) Spring 对本类生成代理（CGLIB 子类），调用方无感：
-     *      proxy.getUserById 在目标方法前后织入 CacheInterceptor 的通知
-     *   3) 两种代理实现的选择逻辑：
-     *      有接口且未强制 CGLIB -> JDK Proxy（反射调用）
-     *      无接口（本类）或配置 proxyTargetClass -> CGLIB（子类覆盖）
-     *   4) 与装饰器（Decorator）的本质区别：
-     *      代理强调"访问控制"（何时调用、是否缓存命中、权限），
-     *      装饰器强调"功能叠加"（BufferedReader 套 FileReader）；
-     *      AOP 代理常被称为"动态装饰"，但语义上更偏控制侧
-     *
-     * 三、空对象模式（Null Object）与 Optional 的现代替代
-     *   1) 经典：定义一个"什么都不做"的 NullUser 代替返回 null，
-     *      消除调用方的 null 判空
-     *   2) 本项目用 Optional<User> 代替 NullUser：
-     *      更轻量、语义更精确（可能有值），与 Stream 天然配合
-     *   3) 何时仍需要 NullObject：当"无值时要有默认行为"
-     *      （如日志记录器默认 NoOpLogger）比 Optional 表达更清晰
+     * 一、层间职责的 REST 视角
+     *   1) Controller 层：协议语言（HTTP 方法、状态码、头、序列化）
+     *   2) Service 层（本类）：业务语言（规则、状态转移、领域不变式）
+     *   3) Repository 层：持久化语言（查询、事务边界内）
+     *   4) 判定口诀：如果在 Service 出现 HttpServletRequest/Response 类型
+     *      或返回 ResponseEntity，说明分层已泄漏——协议不该越层
+
+     * 二、业务异常 → HTTP 状态码的映射契约
+     *   1) 本类抛 ResourceNotFoundException（业务语义"没找到"），
+     *      由全局处理器映射 404——把语义翻译动作留到边缘层
+     *   2) 常见映射原则（Service 只关心业务语义，不关心数字）：
+     *      "资源不存在" -> NotFound（Service 层抛 ResourceNotFoundException）
+     *      "参数业务不合法" -> BadRequest（IllegalArgumentException 或自定义）
+     *      "唯一约束冲突" -> Conflict（409，重复创建用户名）
+     *      "并发更新冲突" -> Conflict 或 PreconditionFailed（乐观锁失败）
+     *      "当前用户无权限" -> Forbidden（403，区别于 401 未认证）
+     *   3) 状态码是协议层产物，但业务异常设计要为映射留好语义标签，
+     *      不能只靠 message 字符串 match——见 ResourceNotFoundException 块
+
+     * 三、领域不变式与 API 校验谁先谁后
+     *   1) 协议侧校验（@Valid、@NotNull、格式）：早失败、低开销，
+     *      在参数绑定阶段完成，400 直接返回，不打扰业务层
+     *   2) 领域侧校验（用户名不存在才能创建、转账余额必须够）：
+     *      必须在 Service 里做，因为依赖 Repository 数据
+     *   3) 双重校验不是浪费：协议校验是"入口海关"，拦截 90% 无效请求；
+     *      领域校验是"业务守门员"，处理逻辑级合法性
+     *   4) 本类 existsByUsername 检查属于领域校验，位置正确；
+     *      UserDto 加 @NotBlank 后用户名非空可下沉到协议校验
+
+     * 四、Service 层的字段/方法可见性与 API 演进
+     *   1) 本类方法签名决定了 API 行为特征：
+     *      getAllUsers(Pageable) -> API 分页参数直接透传，
+     *      分页语义由 Spring Data 的 Pageable 定义，是隐性契约
+     *   2) 缓存 key 的变更会破坏幂等性预期：@Cacheable(key) 改了，
+     *      旧缓存全部"失效"，瞬时回源可能压垮 DB——发布时需预热
+     *   3) 方法间语义稳定的方法（getUserById）改返回类型（如返回
+     *      Optional 而非直接抛异常）会破坏调用方契约——
+     *      Service 是内部 API 也必须做兼容性评估
+     *   4) 事务边界：默认单方法单事务，对外契约是"要么全成功要么全回滚"
+
+     * 五、性能契约的显式化（防"隐性 API"漂移）
+     *   1) 本类 getUserById 在 @Cacheable 命中时是 ns 级响应；
+     *      miss 时依赖 DB 查询——同一接口 RT 量级完全不同
+     *   2) 客户端视角：必须知道"接口 P99 是 50ms 还是 500ms"，
+     *      才能设超时；隐性性能差异会让客户端吊死或雪崩
+     *   3) 实践：把缓存命中指标（Cache Hit Rate）报给监控，
+     *      Miss Spike 时触发告警——这是 API 可观测性的延伸
+     *   4) 接口契约文档应包含："此端点使用缓存，受 TTL 影响可能读到
+     *      X 秒内旧数据"——一致性 SLA 必须明示，避免"读到旧数据"被
+     *      当作 Bug 上报
      * =========================================================================
      */
 }

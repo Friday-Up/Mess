@@ -173,40 +173,58 @@ public class UserController {
 
     /*
      * =========================================================================
-     * 【设计模式】适配器与模板方法：HandlerAdapter 与 DispatcherServlet 流水线（非可执行代码）
+     * 【HTTP/REST】RESTful 资源路由规范与 URL 设计（非可执行代码）
      * =========================================================================
      *
-     * 一、适配器模式（Adapter）在 MVC 的核心位置
-     *   1) 问题：Handler 的形态多样（@RequestMapping 注解方法、
-     *      Controller 接口实现、RouterFunction、HttpRequestHandler），
-     *      DispatcherServlet 不能写 N 个 if-else 分别调用
-     *   2) 解法：引入 HandlerAdapter 接口统一调用面：
-     *      boolean supports(Object handler);
-     *      ModelAndView handle(HttpServletRequest, Object handler);
-     *   3) DispatcherServlet.getHandlerAdapter 遍历已注册适配器，
-     *      由 supports 决定归属：本类 @RequestMapping 方法归属
-     *      RequestMappingHandlerAdapter
-     *   4) 价值：新增 Handler 类型只需新增 Adapter，DispatcherServlet
-     *      零改动——对扩展开放、对修改关闭（OCP 的教科书实现）
+     * 一、资源路由七字诀（项目规范速查）
+     *   1) 名词复数：/api/users 而非 /api/user 或 /api/getUserList
+     *   2) 层级表达归属：/api/users/{id}/orders 表示"某用户的订单"
+     *   3) HTTP 动词定操作：GET 读 / POST 建 / PUT 全量改 /
+     *      PATCH 部改 / DELETE 删——路径里不应出现动词
+     *   4) 筛选用 query：GET /api/users?role=admin&page=0&size=20
+     *   5) 版本前缀：/api/v1/users（重大破坏性变更用 v2 并行，见节四）
+     *   6) 稳定路径：路径段一旦发布即契约，废弃要走 deprecation 流程
+     *   7) 层级不过三：超过三层的嵌套说明该拆独立资源路由
 
-     * 二、适配器的"双向"形态
-     *   1) 类适配器（继承）：被适配者的子类 + 实现目标接口
-     *   2) 对象适配器（组合）：持有一个被适配者的引用（Spring 选这条）
-     *   3) RequestMappingHandlerAdapter 组合了 HandlerMethodArgumentResolver/
-     *      returnValueHandler/Converter 等子系统，它是"复合适配器"
-     *   4) 判断要点：适配器不改被适配者行为，只换调用协议
-     *      若改了行为更像装饰器（Decorator）见 Service 层的代理块
-     *
-     * 三、模板方法模式（Template Method）：HttpServlet 的骨架
-     *   1) javax.servlet.http.HttpServlet 的 service() 为骨架方法：
-     *      service(req, resp) 内部按 method 分派到 doGet/doPost/doPut...
-     *   2) FrameworkServlet（Spring 的扩展）覆盖 service 完成字符编码、
-     *      locale、RequestContextHolder 设置，再调用 doService（抽象步骤）
-     *   3) DispatcherServlet.doDispatch 是最终的模板方法：
-     *      getHandler -> getAdapter -> handle -> resolveException，
-     *      每一步都是可被子类覆盖的受保护方法
-     *   4) 项目启示：模板方法识别口诀——"流程固定、步骤可变"，
-     *      写代码遇到此类场景，先抽骨架再留扩展点比塞 if-else 稳健
+     * 二、本类端点的 REST 合规性体检
+     *   1) GET /api/users（分页查询）——合规：复数名词 + query 分页
+     *   2) POST /api/users（创建）——合规：动词隐含在 POST
+     *   3) GET /api/users/{id} —— 合规：子路径定位单资源
+     *   4) GET /api/users/username/{username} —— 有效性尚可，
+     *      REST 派推荐改为 /api/users?username=x（query 是筛选语义）；
+     *      路径参数表达"唯一标识定位"是可接受变体
+     *   5) PUT /api/users/{id} —— 合规：全量替换语义（与 PATCH 区别见下）
+     *   6) DELETE /api/users/{id} —— 合规：幂等删除
+     *   7) 一个偏离：删除返回 ApiResponse(false?) 的设计选择——
+     *      REST 派主张 204 No Content + 空体，
+     *      项目实用派返 200 + 业务 message，两者都有支持者
+
+     * 三、PUT 与 PATCH 的本质差异（新人最容易混）
+     *   1) PUT：全量替换——客户端发送的 body 即新状态，缺字段=置 null
+     *      实现：service.findById -> 把 DTO 完整覆盖 entity -> save
+     *   2) PATCH：部分更新——只改 body 里的字段，其他保持
+     *      实现：先 load entity，再按 body 里非 null 字段选择性覆盖
+     *   3) 本类用的是 PUT + UserDto 全字段，等价于全量替换——合规；
+     *      未来需求"只改邮箱"必须新增 PATCH，不能靠 PUT 少传字段
+     *   4) 客户端契约声明：PUT 必须 Body 自包含所有必填字段，
+     *      服务端做 Bean Validation 校验全字段责无旁贷
+
+     * 四、API 版本化策略四选一
+     *   1) URI 版本：/api/v1/users —— 直观、可路由、缓存友好（项目推荐）
+     *   2) Header 版本：Accept: application/vnd.myapp.v1+json
+     *      —— 干净，但客户端/文档/缓存成本高
+     *   3) Query 参数：?version=1 —— 灵活但污染契约
+     *   4) 无版本（设计约束式）：用兼容性规则（只加字段不删字段）
+     *      —— 适合内部小项目，规模化后难以兑现
+     *   5) 本项目现状无版本前缀；规模化演进起点：/api/v1/users
+
+     * 五、响应头来完整化 REST 语义（项目可补强清单）
+     *   1) 分页：Content-Range: users 0-19/100 或 Link 头 + next/prev
+     *   2) ETag：GET /api/users/{id} 可带 ETag，客户端再请求附
+     *      If-None-Match，命中返 304 Not Modified（省带宽）
+     *   3) Location：201 创建成功指向新资源 Location: /api/users/42
+     *   4) Allow：405 响应必须带 Allow: GET, POST（告诉客户端可用方法）
+     *   5) Cache-Control：GET 类接口显式声明 max-age=60 复用 CDN 缓存
      * =========================================================================
      */
 }

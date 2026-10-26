@@ -177,32 +177,58 @@ class HelloControllerTest {
 
     /*
      * =========================================================================
-     * 【设计模式】Stub 模式：when().thenReturn() 的桩件本质（非可执行代码）
+     * 【HTTP/REST】HTTP 方法测试矩阵与安全方法验证（非可执行代码）
      * =========================================================================
      *
-     * 一、桩件（Stub）的定义与本项目兑现
-     *   1) 桩 = 提前准备对特定输入的固定回答，被测类只依赖这些回答
-     *   2) 本类 @MockBean UserService 即桩：
-     *      when(service.hello(any())).thenReturn("Hello, Stub!")
-     *   3) 桩不验证任何交互——调用了几次、传了什么参数都无所谓，
-     *      只关心被测类在桩回答下产出正确结果
-     *
-     * 二、Stub vs Mock 的实操分水岭
-     *   1) Stub 的问题形态："如果 service 返回 X，controller 应响应什么？"
-     *      断言目标是 controller 的输出
-     *   2) Mock 的问题形态："controller 是否调用了 service 且只一次？"
-     *      断言目标是 controller 对 service 的行为
-     *   3) 本类只打桩不 verify：因为 controller 是薄层，
-     *      它的价值在输出而非它如何调用下层——Stub 为主
-     *   4) 越下层/越有边界的类越适合 verify（如事务、发消息），
-     *      越上层/越面向响应的类越适合只 Stub
-     *
-     * 三、桩件的可读性纪律
-     *   1) 桩要"即需即立"：测试体开头 setup，不要堆在每个断言间
-     *   2) 无关桩别打：用 lenient() 或改初始化策略，
-     *      避免未使用的桩抛 UnnecessaryStubbingException
-     *   3) 参数匹配器语义：any() 宽松匹配 vs 精确值，
-     *      测试意图决定：契约测试精确、行为测试 any
+     * 一、本类覆盖的 HTTP 方法测试维度
+     *   1) GET /hello（默认参数）-> 200 + 包体 data="Hello, World!"
+     *   2) GET /hello?name=Spring -> 200 + 含请求参数字符串
+     *   3) GET /hello/advanced -> 高版本问候端点（多参数组合）
+     *   4) POST /hello -> 200 + "(via POST)" 标识
+     *   5) 缺失维度建议补强（REST 视角）：
+     *      GET 不支持请求体（应 400 或忽略）
+     *      HEAD /hello（同 GET 但无包体）
+     *      OPTIONS /hello（返 Allow 头）
+     *      不存在的路由 -> 404
+     *      方法不匹配 -> 405 + Allow 头
+
+     * 二、安全方法（Safe Method）的契约验证
+     *   1) GET 必须是只读：测试断言 "GET 后 Repository 状态不变"
+     *      （verify(repo, never()).save(any())）——防止把写操作混入 GET
+     *   2) GET 必须可缓存：断言响应带 Cache-Control 头（项目可配置）
+     *   3) GET 必须可重复：相同请求两次响应相同字符串——
+     *      除非显式声明"内容随时间变"，否则违反 = 契约破损
+     *   4) GET 请求体语义：框架默认忽略 GET body（规范不鼓励），
+
+     * 三、方法与状态码的交叉矩阵（防止误返回）
+     *   1) GET 成功：200（带包体）或 204（明确空体）
+     *   2) GET 失败：4xx（不返 5xx 给客户端参数问题）
+     *   3) POST 创建成功：201 + Location 头（项目当前 200 可接受，演进改 201）
+     *   4) POST 业务失败：4xx + 包体 errorCode
+     *   5) PUT 成功：200（返更新后资源）或 204（空体）
+     *   6) DELETE 成功：204（推荐）或 200（带 message）
+     *   7) 未预期的 5xx：测试不应覆盖具体异常，只测兜底路径返回包体格式
+
+     * 四、HTTP 头的契约测试用例清单
+     *   1) Content-Type 断言：application/json（编码不指定时默认 UTF-8）
+     *   2) Cache-Control：GET /hello 返 max-age=60（若启用）
+     *   3) Vary：Accept-Encoding（若启用 gzip）
+     *   4) CORS 头：跨源请求 OPTIONS 预检验证 Allow-Origin 等头
+     *   5) X-Request-Id：每个响应必带，与请求头传入的回显一致
+     *   6) Security 头：X-Content-Type-Options: nosniff（Spring Security 默认开）
+     *   7) 断言写法示例：
+     *      .andExpect(header().string("Content-Type", "application/json"))
+     *      .andExpect(header().exists("X-Request-Id"))
+
+     * 五、MockMvc 与真实 HTTP 的差异（决策使用场景）
+     *   1) MockMvc 走的"对象模拟"路径，不发真 TCP，不解析真 HTTP 报文
+     *   2) 测不到的：Content-Length 准确性 / chunked encoding / gzip 透明 / 
+     *      真实连接超时 / TLS 协商
+     *   3) 能测到的：路由 / 状态码 / 包体 / 头 / Filter 链 / 序列化
+     *   4) 何时换 TestRestTemplate + RANDOM_PORT：
+     *      需要验证 HTTP 协议级行为时（如 CORS 预检真 OPTIONS）
+     *      或部署前需要真容器冒烟时
+     *   5) 本类日常用 MockMvc 毫秒级，CI 烟测加 1-2 个真实端点用例即可
      * =========================================================================
      */
 }

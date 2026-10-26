@@ -194,38 +194,68 @@ class UserServiceTest {
 
     /*
      * =========================================================================
-     * 【设计模式】Fake vs Mock vs Stub 的最终抉择：本类的纯正性（非可执行代码）
+     * 【HTTP/REST】Service 单测中的契约边界映射验证（非可执行代码）
      * =========================================================================
      *
-     * 一、本类的替身归类
-     *   1) @Mock UserRepository：是 Stub（thenReturn 提供数据）
-     *      也是 Mock（verify 验证调用），两种用途并存
-     *   2) 与控制器测试的差异：本类更偏 Mock——
-     *      Service 层的业务规则依赖"调用 Repository 的方式"，
-     *      如"先 existsByUsername 再 save"，
-     *      这类逻辑只能用 verify 或实际效果推断
-     *   3) 结论：Service 是"逻辑中枢"，Controller 是"转发门户"，
-     *      测试替身权重：Service 层 Mock 占比应高于 Controller 层
-     *
-     * 二、Fake 数据源在本项目的深层应用
-     *   1) 本类虽不用 Fake，但与 @DataJpaTest 的配合值得知晓：
-     *      @DataJpaTest 用 H2（Fake MySQL）跑真 Repository，
-     *      无需 mock，验证"派生方法是否输出正确 SQL"
-     *   2) Fake 的成本：H2 与 MySQL 的行为差异（类型/函数/索引）
-     *      可能造出"测试绿、生产红"。
-     *   3) 修正方案：Testcontainers 真实 MySQL 容器 + @DataJpaTest，
-     *      是集成测试层的终极可信替换，CI 每日跑一次（慢但真）
-     *   4) 决策原则：Fake 保证速度（开发频繁跑），
-     *      Mock 保证解耦（单元快测），真库保证保真（关键路径覆盖）
-     *
-     * 三、替身与真实实现的协同测试矩阵
-     *   层次：单元层（纯 Mockito）-> 切片层（@WebMvcTest/@DataJpaTest）
-     *        -> 集成层（@SpringBootTest + Fake Bean）-> 端到端（真库容器）
-     *   替身：Mock/Stub（快）-> Spy/@MockBean（中）-> Fake H2（中）
-     *        -> Testcontainers（慢）
-     *   频率：每次提交（快）-> 每次 PR（中）-> 每日/上线前（慢）
-     *   本类定位：单元层快测，为集成层减负，
-     *      集成测试只补本类测不到的框架行为（缓存/事务/AOP）
+     * 一、Service 测试不直接测 HTTP，但定义了 HTTP 契约的"业务根基"
+     *   1) 本类用纯 Mockito 验证业务规则（不启动容器）
+     *   2) HTTP 契约的状态码分支源头在此：
+     *      getUserById(99L) 抛 ResourceNotFoundException -> HTTP 404
+     *      createUser 重名 -> 抛 IllegalArgumentException（建议改 409） -> HTTP 400
+     *      转换正确性 -> 决定包体 data 字段结构与精度
+     *   3) 单测价值：毫秒级验证"业务规则不变"，是 HTTP 契约稳定性的内核
+
+     * 二、业务异常 → 状态码映射的单测覆盖
+     *   1) existsByUsername 返 true 时 createUser 抛异常：
+     *      assertThatThrownBy(() -> service.createUser(dto))
+     *        .isInstanceOf(IllegalArgumentException.class);
+     *   2) findById 返 empty 时 getUserById 抛 ResourceNotFoundException：
+     *      assertThatThrownBy(() -> service.getUserById(99L))
+     *        .isInstanceOf(ResourceNotFoundException.class)
+     *        .hasMessageContaining("用户不存在");
+     *   3) 这两条断言即覆盖 400 与 404 的业务根因，端到端再由
+     *      UserControllerTest 验证状态码（双层职责分离）
+     *   4) 建议新增异常类型：DuplicateResourceException（409）
+     *      让"重名"区分于"参数不合法"——API 契约表达更精确
+
+     * 三、DTO 转换的字段契约保证
+     *   1) convertToDto 决定响应包体字段：
+     *      User -> UserDto 时字段拷贝完整性与精度
+     *   2) 易错点（用例应专门覆盖）：
+     *      a) null 字段透传：entity.name=null 时 dto.name=null
+     *         （而非空串或抛 NPE——序列化层需明示 null 语义）
+     *      b) 时间精度：LocalDateTime 不丢毫秒
+     *      c) 类型一致性：Long id 到 dto.id 仍是 Long（防被误改 String）
+     *   3) 转换不变量断言（每个字段）：
+     *      assertThat(dto.getId()).isEqualTo(entity.getId());
+     *      assertThat(dto.getUsername()).isEqualTo(entity.getUsername());
+     *      ...（逐字段 assert 不是啰嗦，是契约护栏）
+
+     * 四、分页参数透传与排序语义的验证
+     *   1) 调用 service.getAllUsers(PageRequest.of(0, 10))
+     *      -> verify(repo, times(1)).findAll(pageableCaptor.capture())
+     *      -> 断言捕获的 Pageable：pageNumber=0 / pageSize=10
+     *   2) 排序：PageRequest.of(0, 10, Sort.by("username").descending())
+     *      -> 断言传入 repo 的 Pageable sort 属性与方向正确
+     *   3) 边界：size=0（不允许）应被 Spring Data 校验为 IllegalArgumentException
+     *   4) 契约视角：客户端 query 参数 ?size=-1 应被拦在协议层（400），
+     *      单测这里验证的是"合法 Pageable 不被 service 篡改"
+
+     * 五、单测 → 集成契约的演进兼容策略
+     *   1) 单测只测"逻辑不变"，不测"响应格式"——加字段不会让单测红
+     *   2) 集成测试负责格式契约：字段存在性、状态码、包体结构
+     *   3) 演进流程（加字段 usernameCanonical）：
+     *      a) 单测：convertToDto 新字段赋值断言（确保不漏）
+     *      b) 集成：包体 hasJsonPath("$.data.usernameCanonical")
+     *      c) 文档：OpenAPI 注解 @Schema 补充
+     *      d) 通告：CHANGELOG 通知消费者（新字段为可选）
+     *   4) 删字段流程（弃用 name）：
+     *      a) 先标 @Deprecated（IDE 提示 + 文档宣告）
+     *      b) 单测与集成测试中给该字段加 deprecated 标记
+     *      c) 至少一个版本周期后真删——测试同步删除断言
+     *   5) 契约版本管理高级实践：
+     *      给集成测试标 @Tag("api-v1")，v2 上线时同一套用例跑两遍
+     *      （按路径前缀参数化），保证 v1/v2 行为并列可验
      * =========================================================================
      */
 }

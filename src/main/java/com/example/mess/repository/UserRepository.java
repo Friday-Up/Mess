@@ -91,44 +91,58 @@ public interface UserRepository extends JpaRepository<User, Long> {
 
 /*
  * =========================================================================
- * 【设计模式】仓储模式与 JDK 动态代理：从 DAO 到领域仓储（非可执行代码）
+ * 【HTTP/REST】分页与排序的 HTTP 语义（非可执行代码）
  * =========================================================================
  *
- * 一、仓储模式（Repository / DDD 企业模式）
- *   1) 定位：模仿集合（Set/Map）语义管理领域对象（聚合根），
- *      屏蔽持久化细节（库/ORM/文件），领域层只面向"集合"
- *   2) 与 DAO 的关键差异：
- *      - 面向对象：DAO 面向数据表（UserDao 的方法映射 SQL），
- *        Repository 面向聚合根（返回 User 聚合整体而非数据行）
- *      - 方法语义：DAO 技术语义（selectByEmail），
- *        Repository 业务语义（findByUsername / existsByEmail）
- *      - 边界：一个聚合根一个 Repository；子实体不单独建
- *      （UserAddress 随 User 仓储一起加载保存）
- *   3) 本接口天然符合：方法名领域语义、管理 User 聚合、
- *      隐藏 JPA 实现细节（调用方不知道底层是 Hibernate 还是别的）
+ * 一、分页参数的 REST 表达规范
+ *   1) 位置选择：query 参数（?page=0&size=20）vs 路径（/page/0）
+ *      —— REST 派共识用 query，因为"分页是筛选，不是资源"
+ *   2) 参数命名约定：page / size（Spring Data 默认，0-based）
+ *      别名：offset/limit（偏移式，SQL 友好）
+ *      选择后全项目统一，不要混用（前端心智成本）
+ *   3) 上限约束：size 必须设 max 限制（如 size=1000 拒绝），
+ *      否则客户端一次请求把全表拖走——DoS 与 OOM 双重风险
+ *   4) 排序：sort=username,desc&sort=createdAt,asc 多字段逗号串
+ *      Spring Data Pageable 自动解析，方向默认 asc
 
- * 二、工厂模式（Factory Method）：JpaRepositoryFactoryBean
- *   1) 本接口在容器中的 BeanDefinition 不是接口本身，
- *      而是 JpaRepositoryFactoryBean（FactoryBean 接口的实现）
- *   2) FactoryBean.getObject() 即工厂方法：运行时决定产出什么——
- *      这里产出的是"实现了本接口的 JDK 动态代理对象"
- *   3) 动态代理（Proxy 的运行时形态）
- *      a. 构造默认实现 SimpleJpaRepository 实例（带 EntityManager）
- *      b. QueryExecutorMethodInterceptor 作为 InvocationHandler
- *      c. Proxy.newProxyInstance 生成 $ProxyNN，implements 本接口
- *   4) 一次方法调用的旅程序：
- *      proxy.findByUsername("x") -> handler.invoke ->
- *      判断：派生查询 or 默认方法？-> 找到对应执行 -> 返回
- *      - existsByUsername：存在检查走 exists 投影
- *   5) 设计启示：接口 + 默认行为 + 代理拦截 的组合
- *      让"声明即实现"成为可能，Spring Data 的核心竞争力即此
- *
- * 三、规范模式（Specification）与查询对象
- *   1) Specification<T> 是标准模式：用对象封装查询条件，
- *      而不是拼字符串或写死 JPQL
- *   2) 本项目如有多条件搜索需求：让本接口 extends
- *      JpaSpecificationExecutor<User> 获得 where(and/or) 组合能力
- *   3) 模式边界：Specification 适合"运行时动态条件"，
- *      固定查询仍用派生方法命名（更简洁、可读）
+ * 二、分页响应的两种语义模型
+ *   1) Page 模型（Spring Data 当前选用）：
+ *      内容 + 元数据（totalElements / totalPages / number / size）
+ *      代价：每次都执行 count(*) 查询（全表扫描）
+ *   2) Slice 模型：内容 + hasNext 布尔（不查 count）
+ *      代价：前端不显示总页数，只能"上一页/下一页"
+ *   3) 决策树：
+ *      前端需要页码跳转 / 总数展示 -> Page（接受 count 成本）
+ *      无限滚动 / feed 流 / 列表式 UI -> Slice（首选，性能优）
+ *   4) 深分页陷阱：LIMIT 10000000, 20 在 MySQL 上要扫前 1000 万行，
+ *      解决：游标分页 WHERE id > ? ORDER BY id LIMIT 20（用索引）
+
+ * 三、本接口在 REST 链路中的角色
+ *   1) 签名 findAll(Pageable)：接口层把 HTTP query 参数透传到 DB，
+ *      语义对齐——控制器不需要手工解析分页字符串
+ *   2) 是弹簧的关键节点：PageableHandlerMethodArgumentResolver
+ *      做协议到领域的翻译（query -> PageRequest），Repository 直接消费
+ *   3) 排序安全：sort 字段名直接拼入 SQL，若客户端传不存在的字段
+ *      会抛 PropertyReferenceException -> 全局处理器映射 400，
+ *      拒绝非法字段比静默忽略更安全（避免看似成功的行为不一致）
+ *   4) 跨字段排序：sort=email,asc 自动按实体字段名解析为
+ *      列名 email——Spring Data 处理映射，无需手写 SQL 片段
+
+ * 四、HTTP 缓存头与 Repository 行为的联动
+ *   1) GET /api/users（分页列表）默认动态，缓存价值低
+ *   2) GET /api/users/{id} 若是低频变更，可加 Cache-Control: max-age=60
+ *      + ETag（基于实体 hash 或 version 字段）
+ *   3) ETag 配合 If-None-Match：304 响应无 body，吞吐极大提升
+ *   4) 条件更新：客户端 If-Match: <etag> → 服务端比较后决定
+ *      是否执行更新，避免"读-改-写"并发覆盖（HTTP 乐观锁机制）
+ *   5) 本项目未启用 ETag，最小可行；当 RT 与带宽是瓶颈时再引入
+
+ * 五、HATEOAS（Hypertext As The Engine Of Application State）
+ *   1) REST 成熟度模型（Richardson）第三级：响应中嵌超链接，
+ *      客户端通过链接发现下一步动作而非硬编码 URL
+ *   2) 示例：GET /api/users/1 响应带 _links: { self, orders, avatar }
+ *   3) Spring 实现：Spring HATEOAS（EntityModel / CollectionModel）
+ *   4) 本项目未启用 HATEOAS——企业内部 API 大多停在第二级
+ *      （资源+动词+状态码），第三级成本高、收益场景窄（开放 API）
  * =========================================================================
  */
