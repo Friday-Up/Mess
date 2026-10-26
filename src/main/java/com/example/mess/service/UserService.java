@@ -217,38 +217,44 @@ public class UserService {
 
         /*
          * =========================================================================
-         * 【数据库与SQL优化】事务边界、传播行为与隔离级别的实战（非可执行代码）
+         * 【JVM内存管理与GC调优】GC 选择与分代假设、调优实战（非可执行代码）
          * =========================================================================
          *
-         * 一、事务的 ACID 在 JPA/Spring 中的落地
-         *   1) 原子性：@Transactional 方法一次提交一次回滚（Spring 代理管理），
-         *      RuntimeException 默认回滚，checked 默认不回滚（rollbackFor 显式配置）
-         *   2) 一致性：业务层保证不变式（如"用户名唯一"由应用层 + DB 唯一索引双保险）
-         *   3) 隔离性：默认 READ_COMMITTED 或 REPEATABLE_READ（按数据库），
-         *      Spring 的 @Transactional(isolation=...) 可覆盖
-         *   4) 持久性：commit 即落盘（MySQL redo log 双 1 配置控制崩溃恢复强度）
-    
-         * 二、事务边界的三条铁律（本类现状评估）
-         *   1) 铁律一：事务方法应只包含"必须原子的 DB 操作"
-         *      反例：@Transactional 方法内做远程调用/发邮件——
-         *      外部调用慢会长时间占连接，连接池耗尽是高发事故
-         *      正解：调外发送，事务内只写本地表（事件监听器异步发送）
-         *   2) 铁律二：同一事务内避免"读-改-写"跨网络依赖
-         *      反例：事务内调下游服务 + 根据结果改库——RT/超时不可控
-         *   3) 铁律三：事务越短越好，长事务 = 锁占用 + 连接占用
-         *      本类方法都是单方法单事务，符合短期原则
-    
-         * 三、隔离级别并发现象的速查表
-         *   1) READ_UNCOMMITTED：脏读（读到未提交数据）——基本不用
-         *   2) READ_COMMITTED：不可重复读（同一事务两次读结果不同）
-         *      PostgreSQL/Oracle 默认
-         *   3) REPEATABLE_READ：幻读（范围条件新插入的行下次能读到）
-         *      MySQL InnoDB 默认，且通过 MVCC + 间隙锁基本消除幻读
-         *   4) SERIALIZABLE：全串行，性能最差，几乎不用
-         *   5) 现象映射到业务：
-         *      "账户余额查询两次不一致" -> 不可重复读，REPEATABLE_READ 解
-         *      "统计报表少了一行" -> 幻读，SERIALIZABLE 或加范围锁
-         *      "用户改名同时另一事务读名" -> 单行读改写，用乐观锁 @Version 比 SERIALIZABLE 轻
+         * 一、选择 GC 收集器的决策树
+         *   1) JDK 8 默认 Parallel（吞吐优先，STW 长但总停顿少）：
+         *      批处理/离线计算首选，本类 CRUD 也可用但延迟敏感路径不优
+         *   2) JDK 9+ 默认 G1（停顿可控 -XX:MaxGCPauseMillis=200，堆 4-32G 甜点区）：
+         *      互联网服务的通用选择，分区模型兼顾吞吐与延迟
+         *   3) JDK 11+ 的 ZGC / JDK 15+ 的 Shenandoah：
+         *      亚毫秒停顿（着色指针/读屏障），超大堆（>32G）或强 SLA 场景
+         *   4) 经验：先 G1 后 ZGC，未遇到 G1 停顿超 SLA 就别升级——
+         *      切换是工程决策，不是"新就是好"
+         *
+         * 二、分代假设与晋升
+         *   1) 弱分代假设：绝大多数对象朝生夕死——本类的 DTO/ApiResponse
+         *      都符合，Young GC 就能清掉，几乎不进老年代
+         *   2) 晋升条件：年龄到达阈值（默认 15，-XX:MaxTenuringThreshold）、
+         *      来自 Survivor、大对象直接进老年代（-XX:PretenureSizeThreshold）
+         *   3)警惕"短期晋升"：Survivor 太小导致对象被强制进老年代 ->
+         *      老年代涨速快 -> 频繁 Mixed GC -> jstat -gc 看 S0/S1 水位判断
+         *   4) GC 日志是第一现场：-Xlog:gc*（JDK 9+）/ -XX:+PrintGCDetails（JDK 8）
+         *      分析工具：GCEasy、GCViewer——先看日志再调参，不盲调
+         *
+         * 三、本类与 GC 调优的连接点
+         *   1) 列表查询返回大集合：可能触发大数组进老年代，
+         *      分页限制 size 上限是 GC 友好的设计
+         *   2) 缓存对象在老年代：@Cacheable 的 User 长期被引用，
+         *      配合堆外/Redis 替代可解放老年代
+         * 四、线上诊断工具的实战选择
+         *   1) 优先 JFR（低开销飞行记录器）：-XX:StartFlightRecording=duration=60s,
+         *      filename=...，不重启获取 GC/分配/阻塞热点——生产级性能分析首选
+         *   2) 在线热诊断用 Arthas（dashboard/trace/watch）：
+         *      方法级耗时与对象分配无侵入观察，比 jstat/jstack 更可读
+         *   3) heap dump 抓"谁在持有"：jmap -histo 看 Top 对象，
+         *      MAT/JOL 分析支配树——OOM 排查的第一现场
+         *   4) 工具顺序铁则：先用低开销工具（JFR/Metrics/日志）定位方向，
+         *      再用高开销工具（dump/profiler）聚焦——别一上来就 dump
+         *
          =========================================================================
          */
 }

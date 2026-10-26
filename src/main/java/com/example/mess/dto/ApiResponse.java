@@ -205,25 +205,30 @@ public class ApiResponse<T> {
 
         /*
          * =========================================================================
-         * 【数据库与SQL优化】响应封装与批量返回的 SQL 成本（非可执行代码）
+         * 【JVM内存管理与GC调优】响应封装对象的分配生命周期（非可执行代码）
          * =========================================================================
          *
-         * 一、data 字段大小 = SQL 传输量
-         *   1) Page<UserDto> 含 20 条记录时包体约 1-2KB，
-         *      若每条 UserDto 含 Biography 等长字段，包体 10x 放大
-         *   2) 列表接口的字段裁剪：列表页只返 id/username/createdAt，
-         *      详情页才返全字段——传输量减半，序列化耗时减半
-         *   3) 只读列裁剪的关键：让 Repository 直接投影（见 UserDto 块），
-         *      而不是查全字段再转 DTO——"select *"与"投影"是 SQL 层的事
+         * 一、ApiResponse 是"边走边丢"的对象
+         *   1) 生命周期：Controller new -> Jackson 序列化 -> 写 Socket 后没人引用：
+         *      理论上只活过一次 Young GC，永远不会进老年代——这是最健康的对象
+         *   2) 危险的反模式：把 ApiResponse 放进缓存/静态 Map：
+         *      生命周期变长 -> 晋升老年代 -> 大量老年代占用 + Full GC 频次升
+         *   3) Jackson 对 ApiResponse 的反射成本：每个字段一次反射读写，
+         *      ObjectMapper 缓存了 Field/Metadata 对象——首次调用贵，后续复用元数据
          *
-         * 二、批量操作的统一响应形态
-         *   1) POST /api/users/batch 请求 10 条：全成功或全失败（@Transactional 原子性）
-         *      响应 data 仍为 ApiResponse(true, "批量创建成功", count=10)
-         *   2) 部分成功（207 Multi-Status，RFC 2518/9110）：
-         *      data = [{id: 1, success: true}, {username: "dup", success: false,
-         *      errorCode: "DUPLICATE"}]，前端按条目渲染结果
-         *   3) 大批量异步：返 202 Accepted + { jobId: "abc" }，客户端轮询任务状态
-         *      （任务表存 batch_job，消费者分批写 DB）
+         * 二、布尔包装与装箱细节
+         *   1) 三个字段 success(Boolean)/errorCode(String)/data(T)：
+         *      Boolean.TRUE/FALSE 是缓存常量，不分配——用 boolean 原生更省
+         *   2) errorCode 用 String：字符串在 JVM 有字符串去重（-XX:+UseStringDeduplication，
+         *      G1 专属，JDK 18+ 其他收集器也支持）——重复错误码可省内存
+         *   3) 指导原则：响应对象短生命周期 + 不可变 + 不入缓存，
+         *      GC 自然消化；真正要省的不是这类对象，而是"被引用逃逸的数据"
+         * 三、泛型擦除与 Jackson 运行时探测
+         *   1) ApiResponse<T> 运行时仅是 ApiResponse：字段 data 类型 Object，
+         *      类型参数不存在对象分配——擦除本身不产生 GC 压力
+         *   2) Jackson 用运行时值类型反推类型并缓存映射（按实例类型一次性缓存），
+         *      高频序列化时无额外分配——序列化器复用比对象分配更值得优化
+         *
          =========================================================================
          */
 }

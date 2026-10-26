@@ -56,27 +56,38 @@ class MessApplicationTests {
 
         /*
          * =========================================================================
-         * 【数据库与SQL优化】集成测试数据库策略：H2 嵌入 versus 真库容器（非可执行代码）
+         * 【JVM内存管理与GC调优】测试上下文的 JVM 配置与类加载泄漏（非可执行代码）
          * =========================================================================
          *
-         * 一、H2 内存库的定位与局限
-         *   1) 本类 contextLoads 用 @SpringBootTest + H2：
-         *      优点：零安装、毫秒级启动、每次测试全新库、CI 可移植
-         *   2) 局限（方言差异）：
-         *      a) SQL 兼容性：MySQL 函数（GROUP_CONCAT/FIND_IN_SET）H2 无
-         *      b) 类型差异：DATETIME(6) 精度、TEXT 长度上限、ENUM 行为
-         *      c) 索引行为：MySQL 走索引的写法 H2 可能全表扫（性能测试无效）
-         *      d) 锁与死锁：H2 单连接模式与 InnoDB 行为差异大
-         *   3) 安全断言：业务逻辑测试（CRUD/校验/状态流转）H2 可信；
-         *      SQL 性能/索引/锁相关测试必须真库，
-         *      否则"测试绿、上线红"的追溯成本是 100 倍
+         * 一、@SpringBootTest 的 JVM 开销画像
+         *   1) 启动完整 ApplicationContext = 与生产同级的类加载量：
+         *      千级 Bean/万级类 -> 测试 JVM 需要给足 Metaspace（-XX:MaxMetaspaceSize）
+         *      与堆（surefire 默认 fork 一个独立 JVM，-Xmx 在 pom 配置）
+         *   2) 测试跑得慢的 JVM 因子：类加载 + Bean 初始化 + C2 JIT 编译 + 
+         *      Spring Context 缓存机制（同配置复用 Context 避免重复启动）
+         *   3) @DirtiesContext 强制重建 Context 是测试慢的头号杀手——
+         *      JVM 重新加载，几秒到几十秒不等，能用隔离 Policy 就别用它
          *
-         * 二、真库测试的落地：Testcontainers / 专属测试库
-         *   1) Testcontainers：CI 拉起一次性 MySQL 容器，方言/索引/锁全真——
-         *      慢（秒级启动），只给 @DataJpaTest 与关键路径用
-         *   2) 数据隔离：每个测试类 @Transactional 自动回滚，或每方法 TRUNCATE 清表
-         *   3) 本类 contextLoads 的 DB 断言点：数据源连接成功 + schema.sql 执行无错
-         *      + Repository Bean 可注入——集成烟囱测试的最小集
+         * 二、测试中的类加载泄漏与 Metaspace OOM
+         *   1) 现象：CI 跑一段时间 Metaspace 持续涨 -> java.lang.OutOfMemoryError:
+         *      Metaspace——测试代码持有静态引用阻断了 ClassLoader 释放
+         *   2) 典型来源：Mockito mock 静态注入未清理、ThreadLocal 未 remove、
+         *      日志框架缓存旧 ClassLoader（SLF4J 与 reload 场景）
+         *   3) 诊断：jcmd <pid> GC.class_stats 或 arthas classloader 命令
+         *      统计 ClassLoader 实例数——单测运行后 ApplicationClassLoader
+         *      应被回收，残留即泄漏
+         *   4) 守护机制：surefire forkCount/reuseForks 定期换 JVM，
+         *      把泄漏的影响线性化——这是 CI 稳定性的兜底
+         *
+         * 三、contextLoads 的 JVM 视角断言
+         *   1) 本测试本质验证：类加载不冲突 + Bean 依赖图完整 + 无循环依赖
+         *      + 数据源连接成功——JVM 层的"能跑起来"烟囱
+         * 四、测试 JVM 与生产 JVM 的参数收敛
+         *   1) 测试默认 JVM 偏小（-Xmx256m 级别）：生产是 GB 级，
+         *      GC 行为、晋升节奏、压缩策略都不同——测试稳定 ≠ 生产稳定
+         *   2) 关键路径用 Testcontainers 起同款 JVM 参数容器跑集成压测，
+         *      把"测试与生产的 JVM 鸿沟"单独列一条风险项跟踪
+         *
          =========================================================================
          */
 }

@@ -143,43 +143,30 @@ public class SecurityConfig {
 
         /*
          * =========================================================================
-         * 【数据库与SQL优化】安全配置与数据库的交互边界（非可执行代码）
+         * 【JVM内存管理与GC调优】过滤链对象分配与密码加密的计算成本（非可执行代码）
          * =========================================================================
          *
-         * 一、认证数据源的分层与现状
-         *   1) 本类 InMemoryUserDetailsManager：内存用户存储（user/password、admin/admin）
-         *   2) 数据库迁移后的认证链路（演进方向）：
-         *      自定义 UserDetailsService -> 注入 UserRepository ->
-         *      findByUsername -> 构造 UserDetails（含密码哈希）-> Spring Security 比对
-         *   3) 关键点：
-         *      a) 密码不能明文存库：BCryptPasswordEncoder 哈希入库
-         *         cost 因子 >= 10，单次哈希 >100ms
-         *      b) 比对走 encoder.matches(rawPassword, hashed)，
-         *         不要自己 MD5/SHA1（彩虹表秒破）
-         *      c) 认证查询走索引：findByUsername 走唯一索引（毫秒级）——
-         *         若用户表上没有 username 索引，登录风暴会拖死 DB
-         *   4) 慢哈希防止暴力撞库：BCrypt 本身慢（10ms~200ms/次），
-         *      攻击者每秒只能试几十次——是安全设计而非性能缺陷
-    
-         * 二、登录风暴的数据库压力评估
-         *   1) 场景：恶意脚本 1000 QPS 尝试登录 -> findByUsername 1000 QPS 查 DB
-         *   2) 解法一（应用层）：登录失败 5 次后封 IP 15 分钟（Redis 计数）
-         *   3) 解法二（应用层）：账号维度限速，
-         *      同一 username 每 10 秒只允许 3 次尝试（Redis Key: login:fail:{username}）
-         *   4) 解法三（DB 层）：把用户名/哈希密码高频访问字段放 Redis 缓存，
-         *      DB 只承担未命中查询——登录查询读写比高，缓存收益明显
-         *   5) 注意缓存安全性：缓存哈希密码风险可控（本身已哈希），
-         *      但缓存全量 UserDetails 要评估权限变更失效策略（变更时主动 evict）
-    
-         * 三、审计日志的落库模式
-         *   1) 登录成功/失败事件 -> 审计表（login_audit）
-         *   2) 表设计要点：高写入、低查询、按时间分区（按日/月分表）
-         *   3) 写入路径选择：
-         *      a) 同步写：登录链路内 INSERT，强一致但拖慢登录
-         *      b) 异步写：ApplicationEventPublisher 发布 LoginEvent ->
-         *         @Async 监听器落库，登录即时返回
-         *      c) 队列：写 Kafka/RocketMQ -> 消费者批量入库（最终一致，吞吐最高）
-         *   4) 推荐组合：b 作为主路径（解耦），重要审计（如管理员操作）走 a
+         * 一、每个请求经过过滤链的 JVM 成本
+         *   1) 一次 HTTP 请求 = 多个 Filter 实例 + SecurityContext + Authentication
+         *      临时对象：QPS 1000 时，过滤链每秒产生数百 KB 临时对象进入新生代
+         *   2) Spring Security 的 SecurityContextHolder 默认 ThreadLocal 策略：
+         *      上下文对象不跨线程，线程复用后需清，泄漏即 ClassLoader 泄漏的入口
+         *   3) 无状态 JWT 方案下：每次请求解析 Token 产生的新对象更少，
+         *      且无 Session 堆占用——高并发场景的内存优势
+         *
+         * 二、BCrypt 的计算成本与 JVM 表现
+         *   4) BCrypt 故意慢（cost 因子决定循环次数），是 CPU 密集而非内存密集：
+         *      cost=10 约 100ms，cost 每加 1 翻倍——登录洪峰时 CPU 打满先于内存
+         *   5) 调优原则：登录路径算 CPU 容量（cost 因子 × QPS），
+         *      列表/读路径才算内存与 GC——不同瓶颈用不同坐标规划
+         *   6) 诊断手法：压测登录时用 top -H 看线程 CPU，BCrypt 会顶满核，
+         *      GC 活动反而不高——别被"性能差"误导去调 GC
+         * 三、安全相关类的加载与现代默认
+         *   1) Spring Security 6 不再依赖 SecurityManager：过滤链的字节码
+         *      与普通 Filter 无异，类加载无 doPrivileged 额外开销
+         *   2) BCryptPasswordEncoder 实例级随机盐（每实例构造）：
+         *      避免类加载期做重计算——构造时机要跟"使用时机"分离
+         *
          =========================================================================
          */
 }

@@ -91,42 +91,39 @@ public interface UserRepository extends JpaRepository<User, Long> {
 
 /*
  * =========================================================================
- * 【数据库与SQL优化】JPA 派生查询的 SQL 生成与索引设计（非可执行代码）
+ * 【JVM内存管理与GC调优】JPA 代理的类加载与 Metaspace 控制（非可执行代码）
  * =========================================================================
  *
- * 一、派生查询方法的 SQL 翻译过程
- *   1) findByUsername(String) -> PartTree 解析 ->
- *      JPQL "select u from User u where u.username = ?1" ->
- *      Hibernate 翻译为 SQL "select * from USER where username = ?"
- *   2) existsByUsername -> Hibernate 优化为 exists 子查询
- *      "select 1 from USER where username = ? limit 1"
- *      只判断命中，不加载实体，比 findByUsername 快
- *   3) 返回类型对 SQL 的影响：
- *      Optional<User>：select 全字段
- *      boolean：select 1 / count 优化路径
- *      Stream：游标（需 close 释放 ResultSet 与连接，见并发块）
-
- * 二、索引设计的因果链（2019+ 复习）
- *   1) 字段上的唯一约束自动建唯一索引（@Column(unique=true)）
- *   2) 覆盖索引（Covering Index）：select 的列全在索引里免回表
- *      示例：select username from USER where username=? -> 唯一索引覆盖，免主键回查
- *   3) 最左前缀原则：复合索引 (a, b, c) 只对 a、(a,b)、(a,b,c) 有效
- *      where b=? 不走索引——设计复合索引必须按查询模式排序
- *   4) 函数失效：where lower(username)=? 不走索引，
- *      改用函数索引（MySQL 8 支持）或存储时就 lowercase
- *   5) 隐式类型转换：where varchar_col = 123（数字）-> MySQL 改转字符串列，
- *      索引失效，性能断崖——参数绑定必须类型对齐（JPA 自动绑定天然避免）
-
- * 三、N+1 查询的识别与根治
- *   1) 症状：findAll() 返回 N 条，循环里访问关联属性触发 N 次额外 SQL
- *   2) 日志辨别：spring.jpa.show-sql=true 看 select 语句数量；
- *      或开 Hibernate 统计 spring.jpa.properties.hibernate.generate_statistics=true
- *   3) 根治路径：
- *      a) 实体图：@EntityGraph(attributePaths = "orders") 单查询 JOIN
- *      b) 批量抓取：@BatchSize(size=50) 把 N 次 select 合并为 N/50 次 IN 查询
- *      c) DTO 投影：直接 select 需要的字段（跨实体不建关联映射）
- *      d) 本项目当前 User 无关联，天然无 N+1——加关联时的预防清单
- *   4) 判定原则：关联仅在真的需要懒加载时用 @ManyToOne FetchType.LAZY
- *      （默认 EAGER 是 N+1 的最大隐患源），读侧模型优先投影
+ * 一、Spring Data JPA 启动时 JIT 生成了多少类
+ *   1) 启动期：Spring 为本接口创建 SimpleJpaRepository 子类代理 + 
+ *      Hibernate 为每个实体生成 Metamodel 类 + 派生查询 JPQL->SQL ->
+ *      编译期生成 ByteBuddy/CGLIB 字节码 -> 加载到 Metaspace
+ *   2) 类的元数据不占堆，而占 Metaspace（堆外本地内存）：
+ *      默认 -XX:MaxMetaspaceSize 不限——长期运行理论上可涨到耗尽本地内存
+ *   3) Spring 动态代理引发的"类加载泄漏"：热部署/重新部署留下旧类
+ *      元数据，Metaspace 只增不减——grep ClassLoader 数量诊断泄漏
+ *
+ * 二、Arthas 视角看本接口
+ *   1) arthas sc -d UserRepository：查看被生成的代理类名（$Proxy / $$Enhancer），
+ *      类加载器指向 ApplicationContextClassLoader
+ *   2) 派生查询的 JIT 内联：findByUsername 与同名 native query 调用频次
+ *      一致时性能无差——别为"方法名太长会慢"的传闻去重写 SQL
+ *   3) 代理类的内存占用估算：本接口 12 个方法 -> 代理类几百 KB，
+ *      与堆使用相比可忽略——别为"代理慢"过早手写实现
+ *   4) 真实瓶颈永远在 SQL 执行：执行计划、索引、网络 RT——
+ *      JVM 类加载通常不是热点（除非启动慢或类加载泄漏）
+ * 三、Native Query 与派生 Query 的 JIT 视角差异
+ *   1) 派生 query：方法名 -> JPQL -> SQL 在启动期一次性翻译，
+ *      运行时直接使用缓存 SQL 字符串——运行时无 JIT 差异
+ *   2) 热点永远在 JDBC 结果集映射（ResultSet -> Entity 的反射/字节码路径）：
+ *      select 不要的列不仅浪费 SQL 传输，也浪费结果映射 CPU
+ *
+ * 四、连接池 Hikari 的 JVM 视角
+ *   1) Hikari 连接持有真实数据库 Connection（堆外 Socket + 堆内包装对象）：
+ *      池大小上限同时决定堆内对象数与线程并发数——
+ *      配置不当要么内存不够，要么线程饥饿
+ *   2) 连接泄漏诊断：Hikari 自带 leakDetectionThreshold：
+ *      借出超阈值未还即告警——堆外资源泄漏无法靠 GC 发现，要靠监控
+ *
  =========================================================================
  */

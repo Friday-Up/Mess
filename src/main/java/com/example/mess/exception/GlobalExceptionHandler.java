@@ -82,34 +82,31 @@ public class GlobalExceptionHandler {
 
         /*
          * =========================================================================
-         * 【数据库与SQL优化】DB 异常的统一处理与状态码映射（非可执行代码）
+         * 【JVM内存管理与GC调优】异常对象分配成本与栈轨迹（非可执行代码）
          * =========================================================================
          *
-         * 一、Spring 包装的 DataAccessException 体系
-         *   1) JDBC 的 SQLException 是受检异常，Spring 翻译为非受检体系：
-         *      DuplicateKeyException extends DataIntegrityViolationException
-         *      QueryTimeoutException / PessimisticLockingFailureException
-         *      均继承 DataAccessException，全局处理器按体系分支处理
-         *   2) 翻译机制：SQLErrorCodeSQLExceptionTranslator 按错误码映射
-         *      MySQL 1062（重复键）-> DuplicateKeyException
-         *   3) 好处：业务代码不 try SQLException，靠类型分支而非错误码字符串
+         * 一、throw 一个异常 JVM 要付多少钱
+         *   1) 异常创建时立即执行 fillInStackTrace()：遍历整个调用栈，
+         *      每帧创建 StackTraceElement 对象——栈深 10000 帧时分配数万个对象
+         *   2) 异常对象本身是引用类型（Throwable/Exception 子类）：
+         *      本类 ResourceNotFoundException extends RuntimeException，
+         *      加上 message/dialogSuppressed 等字段，浅占用几十字节——栈轨迹才是大头
          *
-         * 二、DB 异常 -> HTTP 状态码映射表（errorCode 是契约）
-         *   1) DuplicateKeyException -> 409 + DB_DUPLICATE_KEY
-         *      场景：并发创建同 username，应用层检查通过但唯一约束拒绝
-         *   2) QueryTimeoutException -> 504 + DB_TIMEOUT
-         *      场景：JDBC socketTimeout 触发，DB 可能还在跑——重试易放大，需退避
-         *   3) CannotGetJdbcConnectionException -> 503 + DB_CONNECTION_EXHAUSTED
-         *      场景：Hikari 连接耗时尽，DB 不可达或满负荷，客户端立即降级
-         *   4) OptimisticLockingFailureException -> 409 + DB_VERSION_CONFLICT
-         *      场景：@Version 冲突，提示"数据已被他人修改，请刷新后重试"
-         *   5) TransactionSystemException -> 500（commit 失败，罕见但严重）
+         * 二、异常的性能反模式与修复
+         *   1) 慢调用栈是性能杀手：try { 期待失败 } catch 这种"控制流异常"，
+         *      每次都建几 KB 栈轨迹——异常只留给"真正异常"路径
+         *   2) 关闭昂贵栈轨迹：本类异常继承 RuntimeException 后重写
+         *      fillInStackTrace() { return this; }——404 类"业务分支"不该付栈轨迹成本
+         *   3) 分级处理：业务型异常（NotFound/参数校验）关闭栈轨迹；
+         *      系统错误（OOM/NPE）保留完整轨迹用于排障
+         *   4) jstack/jfr 抓"异常事件"频率：异常 cap 暴涨常是性能问题信号，
+         *      -XX:+StackTraceInThrowable 关闭后丢失排障能力，慎用全局开关
+         * 三、栈轨迹填充的成本控制细节
+         *   1) -XX:-StackTraceInThrowable 全局关闭：所有异常不再有轨迹，
+         *      排障能力归零——只在硬性能 SLA 缺口时作为兜底
+         *   2) 重写 fillInStackTrace 只针对业务异常类——粒度可控，
+         *      推荐做法：业务异常关、系统异常保留
          *
-         * 三、处理 DB 异常的三条纪律
-         *   1) 不把 SQLException/约束名（uk_user_username）回给前端：
-         *      约束名是实现，错误码是契约，一层翻译不可省
-         *   2) 记日志带 SQL 标识：错误码 + 表名 + 耗时，但不打参数值（防泄漏）
-         *   3) 504/503 是容量信号：触发后应联动限流告警，而不是只返回错误
          =========================================================================
          */
 }

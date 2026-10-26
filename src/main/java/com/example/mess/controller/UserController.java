@@ -173,41 +173,30 @@ public class UserController {
 
         /*
          * =========================================================================
-         * 【数据库与SQL优化】控制层视角的查询复杂度与防穿透（非可执行代码）
+         * 【JVM内存管理与GC调优】请求处理的对象分配速率与逃逸分析（非可执行代码）
          * =========================================================================
          *
-         * 一、控制层的查询复杂度红线
-         *   1) N 次串行：循环调 service.getOne() -> N 次 SQL，RT 随 N 线性放大
-         *      解法：service 批量方法 findAllById(List)，一条 IN 查询搞定
-         *   2) N+1 变体：controller 内"查列表 -> 逐个查关联" -> 经典 N+1
-         *      解法：service 用 EntityGraph 一次 JOIN 拿全（见 Repository 块）
-         *   3) 复杂条件拼接：按 5 个可选参数动态拼 SQL，
-         *      Repository 用 JpaSpecificationExecutor + Specification 组合
-         *      不要写十几个 findByNameAndEmailAndXxx 方法（笛卡尔爆炸）
-         *   4) 本类当前查询简单（分页 + 单 ID 查询），
-         *      预防性规范：新增端点时先在 OpenAPI 注释里写"预期 SQL 条数"
-    
-         * 二、请求量与 DB 压力的换算公式
-         *   1) QPS 到 DB QPS：每个请求触发 1-5 次 SQL，连接池 10 连接 SQL RT 10ms，
-         *      DB QPS 上限 = 连接数 x (1000 / RT) = 10 x 100 = 1000
-         *   2) 缓存命中率换算：命中率 90% 时，DB QPS 是入口 QPS 的 10%
-         *      10000 QPS 接口 -> DB 1000 QPS（可行）
-         *      命中率降至 50% -> DB 5000 QPS（连接池打爆）
-         *   3) 工程结论：缓存命中率是 DB 生死线，监控值低于阈值要立即告警
-         *   4) 本类现状：getUserById 走 @Cacheable，缓存击穿/穿透防护见 Service 块
-    
-         * 三、参数的"DB 安全设计"
-         *   1) 分页 size 上限：size=100 拒绝（参数校验层），
-         *      防一次性拉全表 -> DB 内存/网络/客户端全打爆
-         *   2) 模糊查询 like %x%：不走索引全表扫描，
-         *      高频搜索场景切 Elasticsearch（DB 只承担主键/精确查询）
-         *   3) 排序字段白名单：sort=username,desc 只接受白名单字段，
-         *      其余拒绝 -> 防注入 + 防全表 fileSort
-         *   4) ID 范围限制：bulk 操作 ids 数组长度上限（如 100），
-         *      IN (100 个 ID) 索引可用，IN (10000 个) 优化器可能放弃索引
-         *   5) 时间范围查询必须带上限：
-         *      where created_at > '2026-01-01' 没上限 = 全表扫，
-         *      强制要求 startTime + endTime 成对出现（参数校验层拦截）
+         * 一、一次 CRUD 请求分配了多少对象
+         *   1) 场景：POST /api/users 处理一个 1KB JSON -> 
+         *      Jackson 解析树 + User 实体 + UserDto + ApiResponse + 若干 ArrayList
+         *      估算：1KB 输入约产生 5-10KB 临时对象，QPS 500 即 2.5-5MB/s 新生代压力
+         *   2) 新生代 Eden 约 1/3 堆，4G 堆 -> Eden 1.3G，
+         *      按 3MB/s 分配速率，约 7 分钟一次 Young GC——健康水位
+         *
+         * 二、逃逸分析与分配消除
+         *   1) 方法内 new 的小对象未逃逸出方法：C2 可做"栈上分配/标量替换"，
+         *      直接消掉分配——ApiResponse 仅在方法内组装并返回，本身不逃逸到堆外持有
+         *   2) 反例：把 DTO 塞进 ThreadLocal/静态集合 -> 逃逸 -> 必须堆分配 -> GC 压力
+         *   3) JPA 实体却被持久化上下文长时间持有：
+         *      一级缓存让实体天然逃逸——大批量处理用 clear() 分批释放，
+         *      防止 StrongRef 撑大老年代（OutOfMemoryError: GC overhead limit exceeded）
+         *   4) 诊断分配热点：JFR 的 Allocation 事件 / async-profiler 的 alloc 模式
+         * 三、容量规划把堆与 GC 关联起来
+         *   1) 分配率 = 平均响应对象分配 × QPS：1KB 响应 -> 2.5MB/s，
+         *      新生代 1.3G -> 约 8 分钟一次 Young GC——GC 性能死线是分配率
+         *   2) GC 停顿预算：SLA 500ms 中 GC 停顿 /100ms，
+         *      G1 MaxGCPauseMillis=100 是按业务 SLA 反推的参数，不是拍脑袋
+         *
          =========================================================================
          */
 }

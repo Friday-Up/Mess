@@ -123,42 +123,39 @@ public class UserDto {
 
         /*
          * =========================================================================
-         * 【数据库与SQL优化】DTO 投影与查询对象的 SQL 优化路径（非可执行代码）
+         * 【JVM内存管理与GC调优】DTO 分配成本与投影降本（非可执行代码）
          * =========================================================================
          *
-         * 一、DTO 投影的 SQL 收益（读路径优化核心手法）
-         *   1) 全实体查询：select * -> 加载所有列 -> 实体对象 + Hibernate 快照开销
-         *   2) DTO 投影查询：只 select 需要的列 -> 减少网络传输、内存分配、序列化大小
-         *   3) Spring Data JPA 三种投影方式：
-         *      a) 基于接口：interface UserView { String getUsername(); Long getId(); }
-         *         findBy(...) 返回 List<UserView>，只查投影列
-         *      b) 基于类：@Query("select new com.example.UserDto(u.id, u.username) from User u")
-         *         JPQL 构造器表达式，直接生成 DTO
-         *      c) native SQL：@Query(value="select id, username from USER", nativeQuery=true)
-         *         性能最优但失去 JPQL 抽象与跨方言能力
-         *   4) 选择策略：默认接口投影（简洁），复杂查询/聚合用构造器表达式，
-         *      特殊 DB 函数优化时才用 native
-    
-         * 二、本类作为"读模型"的语义定位
-         *   1) 本项目当前 convertToDto（手工转换）发生在 service 层——
-         *      这意味着 DB 查询仍 select * 全字段，投影 0 收益
-         *   2) 优化路径（演进方向）：
-         *      a) 列表页只需 id/username/createdAt -> 换接口投影
-         *      b) 详情页需要全字段 -> 保持 convertToDto
-         *   3) 接口投影 vs 手工转换的权衡：
-         *      接口投影：省 SQL/内存，但调用方拿到动态代理对象（不能直接序列化为 Jackson 问题）
-         *      手工转换：多一次对象复制，但稳定可测试、易扩展
-         *   4) 决策时机：列表场景 QPS > 1000 或表字段 > 30 列时，接口投影收益显著
-    
-         * 三、分页 DTO 的查询成本再优化
-         *   1) Page<UserDto>：SELECT * LIMIT + COUNT(*) 两条 SQL
-         *   2) Slice<UserDto>：只 SELECT * LIMIT + hasNext 判断（count 免了）
-         *      无限滚动 UI 优先 Slice
-         *   3) countProjection：复杂查询时手写 count 优化版
-         *      @Query(countQuery = "select count(u) from User u where u.status = ?1")
-         *   4) 缓存叠加：分页结果缓存 TTL 60s，
-         *      同 page/size 请求直接跳过 DB——读多写少列表场景收益最大
-         *   5) 一致性代价：写后短期读到旧数据（见 HTTP 块），做一致性 SLA 声明
+         * 一、DTO 的双重内存成本
+         *   1) 服务层路径：查全字段 User（含 biography 可能几 KB）->
+         *      new UserDto 巴拷贝 -> 旧 User 等 GC 回收：
+         *      一次读产生两份内存占用，长字段被复制两遍
+         *   2) 投影路径：Repository 直接 select 所需列到 UserDto，
+         *      只加载需要字段——内存与 SQL 传输量同时降，两者是同一成本的两面
+         *   3) 量化收益：列表页 20 条记录，主路径深占用 200KB（含 biography），
+         *      投影路径 20KB——10 倍差距，高 QPS 列表场景是 GC 压力的主要来源
+         *
+         * 二、装箱与缓存池
+         *   1) 每条 UserDto 含若干 Integer 字段：-128~127 命中 IntegerCache，
+         *      超出范围每次 new Integer——高频创建时装箱既分配对象又可能撑大新生代
+         *   2) 大批量场景的优化：列表返回 Map/List 而非对象列表、
+         *      选择原生类型持有、或开启堆外缓存（Ehcache/Heap=AWARE）
+         *   3) 统一返回 ApiResponse<UserDto>：泛型擦除后只是 Object 引用，
+         *      运行时类型检查不产生额外堆分配——框架封包本身成本可忽略
+         * 三、投影的三种实现与内存差异
+         *   1) 接口投影：运行时 JDK 代理生成实现类（仅 Metaspace 增），
+         *      字段按需 select -> 最省内存的写法
+         *   2) 类投影（本类即 UserDto）：直接 new 实际类型 -> 字段精确可控
+         *      + 编译期类型安全——内存成本与接口投影几乎相同
+         *   3) 元组投影（Object[]）无类型安全只省一点内存：
+         *      通常不值，除非统计场景需要几千列宽的自定义聚合
+         *
+         * 四、序列化路径的内存优化点
+         *   1) Jackson Streaming API（JsonGenerator）在大批量导出场景
+         *      不构建整棵 DOM 树：边读边写，内存峰值从全量降到流式缓冲区
+         *   2) DTO 字段使用偏原生（long 替代 Long）减少装箱：
+         *      列表 / 统计接口的密集字段集会显著降低分配速率
+         *
          =========================================================================
          */
 }

@@ -220,26 +220,35 @@ class UserControllerTest {
 
         /*
          * =========================================================================
-         * 【数据库与SQL优化】Controller 测试中的 DB 行为代理与契约锁定（非可执行代码）
+         * 【JVM内存管理与GC调优】Mockito 字节码生成与代理类内存（非可执行代码）
          * =========================================================================
          *
-         * 一、本类测试与 DB 的关系定位
-         *   1) @MockBean UserService：Service 被 mock，DB 不参与
-         *   2) 验证目标：
-         *      a) 路由映射 @GetMapping/@PostMapping 是否正确
-         *      b) 参数绑定（@PathVariable / @RequestBody / Pageable）是否正确
-         *      c) 响应格式（ApiResponse 字段结构）是否稳定
-         *   3) 不验证 DB 行为：SQL 性能/事务/索引——
-         *      那是 @DataJpaTest 切片层与集成测试层的职责
+         * 一、@MockBean 是 JVM 里发生了什么
+         *   1) Spring 为 UserService 注入的是 ByteBuddy 生成的代理子类：
+         *      运行时生成字节码 -> defineClass 加载 -> 每个方法被织入拦截逻辑
+         *   2) 代理类本身占 Metaspace（几百 KB），方法调用占方法区条目——
+         *      本类有 15 个 @Test 共享同一 Mock Context：类只加载一次，行为可重置
+         *   3) 与 Mockito MockMaker 配置相关：inline mock maker（JDK 17+ 默认）
+         *      可 mock final 类/静态方法，但用 instrument agent 修改字节码——
+         *      启动需加 -javaagent:mockito-core.jar，否则警告且 final mock 失败
          *
-         * 二、DB 相关的契约锁定点（不连库但必须断言）
-         *   1) 分页参数契约：page 从 0 开始 vs 前端从 1 开始——
-         *      mock 返回 Page 后断言响应里的页码语义，防偏移事故
-         *   2) 错误码契约：service 抛 ResourceNotFoundException -> 404 + errorCode，
-         *      mock throw 后断言响应体——DB 异常到 HTTP 的翻译层要锁
-         *   3) 幂等契约：POST 重复创建返 409（DuplicateKey）——
-         *      mock 抛 DuplicateKeyException 断言映射，客户端据此决定是否重试
-         *   4) 这是隐性契约——文档化并测试断言，防默认值变更被前端误用
+         * 二、测试速度的 JVM 因子
+         *   1) @SpringBootTest + @MockBean 组合：每次重建 Context 缓存
+         *      （@MockBean 会改变 Context 特征 key 导致缓存失效）——
+         *      大型测试套件跑 CI 慢的常见原因，能用 @WebMvcTest 切片就别上完整集成
+         *   2) 断言消耗：assertEquals 对比对象时调用 equals/toString，
+         *      失败才构建失败消息（lazy 构造）——成功路径几乎零额外分配
+         *   3) JUnit 平台的并行执行：junit.jupiter.execution.parallel.enabled=true
+         *      多线程跑测试，但 Spring Context 是线程绑定的：
+         *      跨线程共享 Context 是安全设计，但要避免 @MockBean 在并行下被并发改写
+         *   4) 测试 JVM 的 GC 选择：-XX:+UseSerialGC 让测试跑得更快
+         *      （小内存无并发开销）——surefire 配置与生产 JVM 配置本就该分开
+         * 三、测试线程与 JVM 配置的可观测性
+         *   1) JUnit5 测试本身运行在 surefire fork 的 JVM：jcmd 可直接 attach，
+         *      与生产诊断同套工具——测试环境是排练生产问题的好场景
+         *   2) 日志框架在测试中初始化触发的反射/字节码增强较多：
+         *      测试启动慢先查 Logback/Log4j2 配置加载与扫描文件数量
+         *
          =========================================================================
          */
 }

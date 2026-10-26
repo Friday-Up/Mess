@@ -41,23 +41,32 @@ public class MessApplication {
 
         /*
          * =========================================================================
-         * 【数据库与SQL优化】应用启动期的数据源初始化与建表策略（非可执行代码）
+         * 【JVM内存管理与GC调优】启动期类加载与 JVM 启动参数（非可执行代码）
          * =========================================================================
          *
-         * 一、启动期数据库做了什么（spring.sql.init 模式）
-         *   1) 本项目 schema.sql + data.sql 由 spring.sql.init.mode=always 触发：
-         *      DataSource 初始化后 -> 执行 schema.sql（DDL）
-         *      -> 执行 data.sql（DML）-> 完成后才进入 ApplicationContext refresh 完成
-         *   2) H2/MySQL 方言差异：schema.sql 直接手写 DDL，
-         *      不同数据库之间需按 profile 切换（schema-h2.sql / schema-mysql.sql）
-         *   3) JPA 的另一种建表方式（Hibernateddl-auto）：
-         *      create-drop：每次启动删表重建，仅测试用法
-         *      update：启动时 diff 实体与表结构自动 ALTER，开发用
-         *      validate：只校验不修改，生产推荐（配合 Flyway/Liquibase 管版本）
-         *      none：完全不管，生产环境由 DBA/迁移工具负责
-         *   4) 本项目选择 sql.init + 手写 DDL 是"显式可控"路线：
-         *      优点：脚本即文档，变更可审阅；
-         *      规模化后演进：把 schema.sql 数据迁移到 Flyway（版本化迁移）
+         * 一、Spring Boot 启动在 JVM 层做了什么
+         *   1) main 开始后：引导类加载器加载 rt.jar 基础类 ->
+         *      AppClassLoader 加载应用类 -> spring.factories 驱动大量类加载
+         *   2) 启动慢的常见元凶：类加载量大（Spring 全家桶数万类）+
+         *      Bean 初始化顺序深 + @ComponentScan 范围过宽
+         *   3) 本类 @SpringBootApplication 默认扫描本包及子包：
+         *      包目录越深、类越多，类加载与 Bean 扫描越慢——启动优化第一步是收敛扫描范围
+         *
+         * 二、启动优化相关的 JVM 参数与工具
+         *   1) -XX:+TieredCompilation + -XX:TieredStopAtLevel=1：
+         *      只用 C1 编译器，启动快 20-40%（牺牲峰值吞吐，适合短任务/CLI）
+         *   2) -Xverify:none / -noverify：跳过字节码校验（省启动时间，
+         *      但有安全风险，仅开发环境慎用）
+         *   3) Spring Boot 3+ 的 CDS（Class Data Sharing）：
+         *      -XX:SharedArchiveFile=app.jsa 归档已加载类元数据，二次启动跳过解析
+         *   4) 检查你的启动瓶颈：-Xlog:class+load 对比类加载量；
+         *      JFR 记录 Startup 事件定位耗时 Bean
+         * 三、main 线程与启动期 Full GC
+         *   1) main 线程完成初始化后把控制权交给 Tomcat 工作线程：
+         *      之后 GC 事件多在工作线程触发——jstack 看 Web 线程而非 main
+         *   2) 启动期 Full GC 是危险信号：Metaspace 类加载爆炸 / Bean 初始化
+         *      过早触发大对象晋升——启动 GC 日志必看，它是配置错误的最早信号
+         *
          =========================================================================
          */
 }
