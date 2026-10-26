@@ -218,78 +218,28 @@ class UserControllerTest {
         verifyNoMoreInteractions(userService);
     }
 
-    /*
-     * =========================================================================
-     * 【HTTP/REST】RESTful 端点契约测试矩阵（非可执行代码）
-     * =========================================================================
-     *
-     * 一、本类用例对应的 REST 契约场景
-     *   1) GET /api/users（分页查询）——安全方法 + 分页参数透传验证
-     *   2) GET /api/users/{id} —— 子资源定位 + 404 异常路径
-     *   3) POST /api/users —— 创建动作 + 请求体验证 + 重复创建（409）
-     *   4) PUT /api/users/{id} —— 全量更新 + 不存在 404
-     *   5) DELETE /api/users/{id} —— 幂等删除 + 不存在路径行为约定
-     *   6) GET /api/users/username/{username} —— 备用键查询
-     *   7) 每个用例的双断言维度：HTTP 状态码 + 包体结构（ApiResponse 格式）
-
-     * 二、状态码断言与 ApiResponse 字段断言的联合校验
-     *   1) NOT_FOUND 用例示范（契约完整性）：
-     *      mockMvc.perform(get("/api/users/999"))
-     *        .andExpect(status().isNotFound())                    // HTTP 层
-     *        .andExpect(jsonPath("$.success").value(false))       // 包体业务层
-     *        .andExpect(jsonPath("$.data").doesNotExist())        // 成功才有的字段
-     *        .andExpect(jsonPath("$.message").exists())           // 错误描述
-     *        .andExpect(jsonPath("$.timestamp").exists())         // 时间戳
-     *        .andExpect(jsonPath("$.path").value("/api/users/999")); // 路径回显
-     *   2) CREATED 用例（当前 200，演进方向 201）：
-     *      .andExpect(status().isOk())  // 当前
-     *      // .andExpect(status().isCreated())  // 演进目标
-     *      .andExpect(jsonPath("$.data.id").isNumber())
-     *      .andExpect(jsonPath("$.data.createdAt").exists())
-     *   3) 分页用例：
-     *      .andExpect(jsonPath("$.data.content").isArray())
-     *      .andExpect(jsonPath("$.data.totalElements").isNumber())
-     *      .andExpect(jsonPath("$.data.number").value(0))  // 当前页
-     *   4) 双断言的必要性：单状态码 / 单包体断言各缺一面
-     *   5) 契约测试模板化：可封装 helper（getAndAssert / postAndAssert）
-
-     * 三、HTTP 方法测试的细节陷阱
-     *   1) PUT 全量替换语义：body 必须含全部可改字段，缺失字段不等于"不改"
-     *      —— 用例设计：PUT body 只给 username，应出现 email 被置 null 的行为
-     *      （若实现是"非 null 才改"——这是 PATCH 语义的错位实现，测试应揪出）
-     *   2) Content-Type 缺失：POST 无 application/json 头会 415
-     *      —— 一条用例覆盖这个客户端常见错误
-     *   3) 请求体格式坏（坏 JSON）：应 400 而非 500
-     *      —— 全局处理器对 HttpMessageNotReadableException 的映射（补强点）
-     *   4) 必填字段空：Bean Validation 触发 MethodArgumentNotValidException
-     *      —— 断言 400 + 字段级错误信息（fieldName + message）
-     *   5) 超大请求体：server.max-http-header-size 限制触发
-     *      —— 集成层冒烟测试覆盖（此层不测）
-     *   6) 幂等键场景（若引入 Idempotency-Key）：
-     *      重复同一 key + same body -> 第二次返回第一次结果快照（200 而非重复创建）
-
-     * 四、路由不存在与方法不匹配的契约测试
-     *   1) 404 路由不存在：get("/api/userx") -> 404 + 包体错误码（若统一）
-     *   2) 405 方法不匹配：put("/hello")（hello 只有 GET/POST）
-     *      -> 405 + 响应头 Allow 包含 GET, POST
-     *      断言：.andExpect(header().string("Allow", containsString("GET")))
-     *   3) 404 vs 405 区分：路径错（路由表里没有）-> 404；
-     *      路径对但方法错（路由表里有该路径）-> 405
-     *   4) Spring 版本差异：Boot 3 默认 404 路由不存在抛 NoResourceFoundException
-     *      （需配置 throw-exception-if-no-handler-found 或用默认机制）
-
-     * 五、契约演进测试的"半严格"模式（平衡稳定与演进）
-     *   1) 严格 equals：断言 data.email 等于固定值
-     *      ——格式或默认值改了测试就红，但能 100% 拦截意外变更
-     *   2) 半严格：只断言字段存在与类型（hasJsonPath + isString）
-     *      ——可弹性接收"加字段"，但拦不住"值语义"变化
-     *   3) 选择依据：
-     *      核心业务字段（username/id/success）-> 严格 equals
-     *      辅助字段（timestamp/message 精确文案）-> 半严格
-     *   4) 删字段必须让测试红：用 hasJsonPath 断言存在，
-     *      把"字段下线"主动加入测试用例的删除流程
-     *   5) 用 @Tag 分组：@Tag("contract") 标记契约核心用例，
-     *      CI 在任何提交都跑，确保变更不会静默破坏契约
-     * =========================================================================
-     */
+        /*
+         * =========================================================================
+         * 【数据库与SQL优化】Controller 测试中的 DB 行为代理与契约锁定（非可执行代码）
+         * =========================================================================
+         *
+         * 一、本类测试与 DB 的关系定位
+         *   1) @MockBean UserService：Service 被 mock，DB 不参与
+         *   2) 验证目标：
+         *      a) 路由映射 @GetMapping/@PostMapping 是否正确
+         *      b) 参数绑定（@PathVariable / @RequestBody / Pageable）是否正确
+         *      c) 响应格式（ApiResponse 字段结构）是否稳定
+         *   3) 不验证 DB 行为：SQL 性能/事务/索引——
+         *      那是 @DataJpaTest 切片层与集成测试层的职责
+         *
+         * 二、DB 相关的契约锁定点（不连库但必须断言）
+         *   1) 分页参数契约：page 从 0 开始 vs 前端从 1 开始——
+         *      mock 返回 Page 后断言响应里的页码语义，防偏移事故
+         *   2) 错误码契约：service 抛 ResourceNotFoundException -> 404 + errorCode，
+         *      mock throw 后断言响应体——DB 异常到 HTTP 的翻译层要锁
+         *   3) 幂等契约：POST 重复创建返 409（DuplicateKey）——
+         *      mock 抛 DuplicateKeyException 断言映射，客户端据此决定是否重试
+         *   4) 这是隐性契约——文档化并测试断言，防默认值变更被前端误用
+         =========================================================================
+         */
 }

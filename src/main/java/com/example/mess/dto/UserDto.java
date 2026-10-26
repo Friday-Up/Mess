@@ -121,62 +121,44 @@ public class UserDto {
         this.createdAt = createdAt;
     }
 
-    /*
-     * =========================================================================
-     * 【HTTP/REST】DTO 作为 API 契约的字段规范与演进策略（非可执行代码）
-     * =========================================================================
-     *
-     * 一、DTO 是契约的"法律文本"
-     *   1) 字段 = 条款：客户端按字段编程，服务端按字段保证语义
-     *   2) 类型 = 解释：Long id 类型即承诺"数字、可能大、不是字符串"
-     *   3) Null 语义：每个字段需明确"可空吗？空时表示什么？"
-     *      缺乏 null 语义文档是客户端 NPE 的高发源头
-     *   4) 顺序无关：JSON 字段顺序不应被客户端依赖（规范未保证），
-     *      测试断言要用字段名访问而非位置索引
-
-     * 二、字段层面的八条 REST 规范（本类体检）
-     *   1) 命名 camelCase ✓（id/username/email/name/createdAt）
-     *   2) 只读字段服务端回填，忽略客户端输入 ✓（createdAt 已在 setter 中防御）
-     *   3) 不暴露内部主键代替代业务键？本项目直接暴露 id 可接受（见 User 块）
-     *   4) 枚举字段值用字符串（"ACTIVE"）而非数字 1/2——契约可读性
-     *   5) 时间 ISO 8601 ✓（LocalDateTime + Jackson 默认输出）
-     *   6) 不嵌套过多层：两层已是上限（DTO 内含 AddressDto 可以）
-     *   7) 拒绝冗余字段：能从已有字段计算出的不重复暴露（age 可由 birthday 算）
-     *   8) 拒绝动词字段：DTO 字段应全是"数据"，不含"动作指令"语义
-
-     * 三、字段演进的三条安全规则（向兼容）
-     *   1) 加字段：安全——旧客户端忽略未知字段（Jackson 默认行为）
-     *   2) 改字段类型：不安全——旧客户端反序列化失败，必须新版本接口
-     *   3) 删字段：破坏性——先标 @Deprecated + 文档，至少一个版本周期
-     *      再下线；硬删会让旧客户端启动崩溃
-     *   4) 必填变可选 / 可选变必填：必填变可选安全；可选变必填破坏性
-     *   5) 实践：DTO 加 jsonSchema 描述或 Swagger @Schema(description=...)
-     *      把契约文档化，OpenAPI 文档从代码生成（见 Swagger 配置）
-
-     * 四、请求 DTO 与响应 DTO 的分界（项目演进参考）
-     *   1) 本类"一身两职"（创建请求 + 查询响应），小项目可接受
-     *   2) 中等规模后拆分：
-     *      UserCreateRequest（POST body：username/email/password——不含 id/createdAt）
-     *      UserUpdateRequest（PUT body：可改字段）
-     *      UserResponse（GET body：id/username/email/name/createdAt——不含 password）
-     *   3) 拆分收益：
-     *      a) 校验注解按请求场景分别配（Create 加 @NotNull id 预填校验）
-     *      b) 防止"响应里把创建才有的字段也带出"
-     *      c) 文档与客户端生成代码更准
-     *   4) 拆分代价：类数量 +2，转换方法 +2——规模小不值，规模大必须
-
-     * 五、序列化与反序列化的契约细节
-     *   1) Jackson 默认按 getter 序列化、setter 反序列化——字段命名跟 Java
-     *   2) 未知字段：默认反序列化抛错，配置 FAIL_ON_UNKNOWN_PROPERTIES=false
-     *      让客户端可发送"含未知字段"的请求（未来兼容）——本项目 application.yml 已配
-     *   3) 日期序列化：默认 timestamps 数字（毫秒），建议配置
-     *      spring.jackson.serialization.write-dates-as-timestamps=false
-     *      输出 ISO 字符串（人类可读、跨语言解析一致）
-     *   4) 数字精度：Long 大于 2^53 时 JS 精度丢失（id 到 9007199254740993 后）
-     *      解法：序列化为字符串（@JsonSerialize(using=ToStringSerializer.class)）
-     *      在雪花 ID 场景必修——自增 id 暂不涉及但必须提前评估
-     *   5) 编码：UTF-8 全链路（Content-Type: application/json;charset=UTF-8），
-     *      防乱码——本项目默认配置已是
-     * =========================================================================
-     */
+        /*
+         * =========================================================================
+         * 【数据库与SQL优化】DTO 投影与查询对象的 SQL 优化路径（非可执行代码）
+         * =========================================================================
+         *
+         * 一、DTO 投影的 SQL 收益（读路径优化核心手法）
+         *   1) 全实体查询：select * -> 加载所有列 -> 实体对象 + Hibernate 快照开销
+         *   2) DTO 投影查询：只 select 需要的列 -> 减少网络传输、内存分配、序列化大小
+         *   3) Spring Data JPA 三种投影方式：
+         *      a) 基于接口：interface UserView { String getUsername(); Long getId(); }
+         *         findBy(...) 返回 List<UserView>，只查投影列
+         *      b) 基于类：@Query("select new com.example.UserDto(u.id, u.username) from User u")
+         *         JPQL 构造器表达式，直接生成 DTO
+         *      c) native SQL：@Query(value="select id, username from USER", nativeQuery=true)
+         *         性能最优但失去 JPQL 抽象与跨方言能力
+         *   4) 选择策略：默认接口投影（简洁），复杂查询/聚合用构造器表达式，
+         *      特殊 DB 函数优化时才用 native
+    
+         * 二、本类作为"读模型"的语义定位
+         *   1) 本项目当前 convertToDto（手工转换）发生在 service 层——
+         *      这意味着 DB 查询仍 select * 全字段，投影 0 收益
+         *   2) 优化路径（演进方向）：
+         *      a) 列表页只需 id/username/createdAt -> 换接口投影
+         *      b) 详情页需要全字段 -> 保持 convertToDto
+         *   3) 接口投影 vs 手工转换的权衡：
+         *      接口投影：省 SQL/内存，但调用方拿到动态代理对象（不能直接序列化为 Jackson 问题）
+         *      手工转换：多一次对象复制，但稳定可测试、易扩展
+         *   4) 决策时机：列表场景 QPS > 1000 或表字段 > 30 列时，接口投影收益显著
+    
+         * 三、分页 DTO 的查询成本再优化
+         *   1) Page<UserDto>：SELECT * LIMIT + COUNT(*) 两条 SQL
+         *   2) Slice<UserDto>：只 SELECT * LIMIT + hasNext 判断（count 免了）
+         *      无限滚动 UI 优先 Slice
+         *   3) countProjection：复杂查询时手写 count 优化版
+         *      @Query(countQuery = "select count(u) from User u where u.status = ?1")
+         *   4) 缓存叠加：分页结果缓存 TTL 60s，
+         *      同 page/size 请求直接跳过 DB——读多写少列表场景收益最大
+         *   5) 一致性代价：写后短期读到旧数据（见 HTTP 块），做一致性 SLA 声明
+         =========================================================================
+         */
 }

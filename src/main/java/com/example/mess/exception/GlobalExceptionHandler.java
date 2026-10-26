@@ -80,77 +80,36 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(response);
     }
 
-    /*
-     * =========================================================================
-     * 【HTTP/REST】全局异常处理器的状态码映射规则（非可执行代码）
-     * =========================================================================
-     *
-     * 一、状态码映射的 REST 语义完整对照表
-     *   1) 本类三个 @ExceptionHandler 的映射决策：
-     *      ResourceNotFoundException -> 404 Not Found（资源真不存在）
-     *      IllegalArgumentException -> 400 Bad Request（请求参数业务不合法）
-     *      Exception（兜底） -> 500 Internal Server Error（服务端未知故障）
-     *   2) REST 派主张的完整状态码分配（项目演进参考）：
-     *      200 OK：GET/PUT/DELETE 成功（返回资源或空体）
-     *      201 Created：POST 创建成功（带 Location 头指向新资源）
-     *      204 No Content：DELETE 成功无返回体 / PUT 成功无返回体
-     *      400 Bad Request：语法错误/校验失败（Body 格式坏、必填空）
-     *      401 Unauthorized：未认证（注意是"没登录"不是"没权限"，术语坑）
-     *      403 Forbidden：已认证但无权限（业务越权）
-     *      404 Not Found：资源不存在 / 路由不存在（两者可细分：用包体 errorCode）
-     *      405 Method Not Allowed：路由存在但不支持该 HTTP 方法
-     *         必须带 Allow: GET, POST 响应头
-     *      409 Conflict：业务冲突（重复创建、版本冲突、状态机不允许）
-     *      410 Gone：资源曾存在已被永久删除（区别于 404"从未存在"）
-     *      412 Precondition Failed：If-Match/If-Unmodified-Since 不满足
-     *      415 Unsupported Media Type：Content-Type 不支持（如发 XML 给只收 JSON 的端点）
-     *      422 Unprocessable Entity：语法对但语义错（如邮箱格式合法但域名不存在）
-     *      429 Too Many Requests：限流触发，必带 Retry-After 头
-     *      500：未预期异常，必须记 ERROR 日志并告警
-     *      503 Service Unavailable：依赖不可用（DB/下游 RPC 挂），
-     *         必带 Retry-After 头，配合断路器半开状态
-
-     * 二、4xx 客户端侧 vs 5xx 服务端侧的归责原则
-     *   1) 4xx = 客户端责任：请求改一改可以成功（400 参数错、404 路径错、
-     *      401 加 token、429 等一会再试）——不要把服务端故障标 4xx，会误导
-     *   2) 5xx = 服务端责任：客户端请求没问题，是服务自己出毛病——
-     *      不要把客户端参数错标 500（会触发无意义的告警风暴）
-     *   3) 边界争议案例：
-     *      数据库唯一约束冲突（客户端重发同样的 username）：
-     *      是 4xx（重复数据是客户端问题），按 409 Conflict——
-     *      本项目现状会抛 DataIntegrityViolationException，
-     *      演进方向是 Service 层提前 exists 检查 + 映射 409
-     *      三方依赖超时：是 5xx（服务不该让客户端等），504 Gateway Timeout
-
-     * 三、本类的 REST 合规体检与补强清单
-     *   1) 404 处理合规（ResourceNotFoundException -> 404 + 包体）✓
-     *   2) 400 处理基本合规——但 Bean Validation 的
-     *      MethodArgumentNotValidException 未专门映射；
-     *      补强：@ExceptionHandler(MethodArgumentNotValidException.class)
-     *      -> 400 + 字段级错误列表（fieldName + message）
-     *   3) 500 兜底合规，但缺少与监控联动：
-     *      补强点 A：拉 Micrometer Counter（异常计数 + 状态码 tag）
-     *      补强点 B：logger.error 必须带 traceId（MDC 自动注入）
-     *      补强点 C：响应里不返堆栈（脱敏），仅 message
-     *   4) 缺失的场景映射：
-     *      NoResourceFoundException（404 静态资源）—— 可转 404 包体
-     *      HttpRequestMethodNotSupportedException -> 405 + Allow 头
-     *      HttpMediaTypeNotSupportedException -> 415
-     *      DataIntegrityViolationException -> 409 Conflict（唯一约束）
-     *      OptimisticLockingFailureException -> 409（版本冲突）
-
-     * 四、错误响应的可观测性约定
-     *   1) 每个错误响应必须带 X-Request-Id（与日志同 ID）
-     *   2) 错误日志关键字段：traceId / userId / path / method / 状态码 /
-     *      异常类型与 message（不含敏感数据）
-     *   3) 告警分级：
-     *      5xx 突增 -> P1 告警（线上事故级）
-     *      4xx 突增 -> P2 告警（可能前端 Bug 或攻击者扫描）
-     *      单次 5xx -> 不告警（噪声控制）
-     *   4) 错误率与 RT 联动看：错误率高 + RT 高 = 容量崩塌
-     *      错误率高 + RT 正常 = 业务逻辑/鉴权问题
-     *   5) 排障口诀：按 traceId 查日志 -> 按状态码分类聚合 ->
-     *      按异常类型看堆栈根因 -> 再决定修复层级（代码/配置/容量）
-     * =========================================================================
-     */
+        /*
+         * =========================================================================
+         * 【数据库与SQL优化】DB 异常的统一处理与状态码映射（非可执行代码）
+         * =========================================================================
+         *
+         * 一、Spring 包装的 DataAccessException 体系
+         *   1) JDBC 的 SQLException 是受检异常，Spring 翻译为非受检体系：
+         *      DuplicateKeyException extends DataIntegrityViolationException
+         *      QueryTimeoutException / PessimisticLockingFailureException
+         *      均继承 DataAccessException，全局处理器按体系分支处理
+         *   2) 翻译机制：SQLErrorCodeSQLExceptionTranslator 按错误码映射
+         *      MySQL 1062（重复键）-> DuplicateKeyException
+         *   3) 好处：业务代码不 try SQLException，靠类型分支而非错误码字符串
+         *
+         * 二、DB 异常 -> HTTP 状态码映射表（errorCode 是契约）
+         *   1) DuplicateKeyException -> 409 + DB_DUPLICATE_KEY
+         *      场景：并发创建同 username，应用层检查通过但唯一约束拒绝
+         *   2) QueryTimeoutException -> 504 + DB_TIMEOUT
+         *      场景：JDBC socketTimeout 触发，DB 可能还在跑——重试易放大，需退避
+         *   3) CannotGetJdbcConnectionException -> 503 + DB_CONNECTION_EXHAUSTED
+         *      场景：Hikari 连接耗时尽，DB 不可达或满负荷，客户端立即降级
+         *   4) OptimisticLockingFailureException -> 409 + DB_VERSION_CONFLICT
+         *      场景：@Version 冲突，提示"数据已被他人修改，请刷新后重试"
+         *   5) TransactionSystemException -> 500（commit 失败，罕见但严重）
+         *
+         * 三、处理 DB 异常的三条纪律
+         *   1) 不把 SQLException/约束名（uk_user_username）回给前端：
+         *      约束名是实现，错误码是契约，一层翻译不可省
+         *   2) 记日志带 SQL 标识：错误码 + 表名 + 耗时，但不打参数值（防泄漏）
+         *   3) 504/503 是容量信号：触发后应联动限流告警，而不是只返回错误
+         =========================================================================
+         */
 }

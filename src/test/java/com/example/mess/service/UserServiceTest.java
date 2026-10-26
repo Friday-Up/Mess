@@ -192,70 +192,32 @@ class UserServiceTest {
         verifyNoMoreInteractions(userRepository);
     }
 
-    /*
-     * =========================================================================
-     * 【HTTP/REST】Service 单测中的契约边界映射验证（非可执行代码）
-     * =========================================================================
-     *
-     * 一、Service 测试不直接测 HTTP，但定义了 HTTP 契约的"业务根基"
-     *   1) 本类用纯 Mockito 验证业务规则（不启动容器）
-     *   2) HTTP 契约的状态码分支源头在此：
-     *      getUserById(99L) 抛 ResourceNotFoundException -> HTTP 404
-     *      createUser 重名 -> 抛 IllegalArgumentException（建议改 409） -> HTTP 400
-     *      转换正确性 -> 决定包体 data 字段结构与精度
-     *   3) 单测价值：毫秒级验证"业务规则不变"，是 HTTP 契约稳定性的内核
-
-     * 二、业务异常 → 状态码映射的单测覆盖
-     *   1) existsByUsername 返 true 时 createUser 抛异常：
-     *      assertThatThrownBy(() -> service.createUser(dto))
-     *        .isInstanceOf(IllegalArgumentException.class);
-     *   2) findById 返 empty 时 getUserById 抛 ResourceNotFoundException：
-     *      assertThatThrownBy(() -> service.getUserById(99L))
-     *        .isInstanceOf(ResourceNotFoundException.class)
-     *        .hasMessageContaining("用户不存在");
-     *   3) 这两条断言即覆盖 400 与 404 的业务根因，端到端再由
-     *      UserControllerTest 验证状态码（双层职责分离）
-     *   4) 建议新增异常类型：DuplicateResourceException（409）
-     *      让"重名"区分于"参数不合法"——API 契约表达更精确
-
-     * 三、DTO 转换的字段契约保证
-     *   1) convertToDto 决定响应包体字段：
-     *      User -> UserDto 时字段拷贝完整性与精度
-     *   2) 易错点（用例应专门覆盖）：
-     *      a) null 字段透传：entity.name=null 时 dto.name=null
-     *         （而非空串或抛 NPE——序列化层需明示 null 语义）
-     *      b) 时间精度：LocalDateTime 不丢毫秒
-     *      c) 类型一致性：Long id 到 dto.id 仍是 Long（防被误改 String）
-     *   3) 转换不变量断言（每个字段）：
-     *      assertThat(dto.getId()).isEqualTo(entity.getId());
-     *      assertThat(dto.getUsername()).isEqualTo(entity.getUsername());
-     *      ...（逐字段 assert 不是啰嗦，是契约护栏）
-
-     * 四、分页参数透传与排序语义的验证
-     *   1) 调用 service.getAllUsers(PageRequest.of(0, 10))
-     *      -> verify(repo, times(1)).findAll(pageableCaptor.capture())
-     *      -> 断言捕获的 Pageable：pageNumber=0 / pageSize=10
-     *   2) 排序：PageRequest.of(0, 10, Sort.by("username").descending())
-     *      -> 断言传入 repo 的 Pageable sort 属性与方向正确
-     *   3) 边界：size=0（不允许）应被 Spring Data 校验为 IllegalArgumentException
-     *   4) 契约视角：客户端 query 参数 ?size=-1 应被拦在协议层（400），
-     *      单测这里验证的是"合法 Pageable 不被 service 篡改"
-
-     * 五、单测 → 集成契约的演进兼容策略
-     *   1) 单测只测"逻辑不变"，不测"响应格式"——加字段不会让单测红
-     *   2) 集成测试负责格式契约：字段存在性、状态码、包体结构
-     *   3) 演进流程（加字段 usernameCanonical）：
-     *      a) 单测：convertToDto 新字段赋值断言（确保不漏）
-     *      b) 集成：包体 hasJsonPath("$.data.usernameCanonical")
-     *      c) 文档：OpenAPI 注解 @Schema 补充
-     *      d) 通告：CHANGELOG 通知消费者（新字段为可选）
-     *   4) 删字段流程（弃用 name）：
-     *      a) 先标 @Deprecated（IDE 提示 + 文档宣告）
-     *      b) 单测与集成测试中给该字段加 deprecated 标记
-     *      c) 至少一个版本周期后真删——测试同步删除断言
-     *   5) 契约版本管理高级实践：
-     *      给集成测试标 @Tag("api-v1")，v2 上线时同一套用例跑两遍
-     *      （按路径前缀参数化），保证 v1/v2 行为并列可验
-     * =========================================================================
-     */
+        /*
+         * =========================================================================
+         * 【数据库与SQL优化】Service 单测中的事务与查询次数契约（非可执行代码）
+         * =========================================================================
+         *
+         * 一、Service 层单测不验证事务，但定义事务契约
+         *   1) 本类纯 Mockito 测试：Repository 被 mock，不启动事务管理器
+         *   2) 事务行为由 Spring 容器的集成测试验证：
+         *      a) 方法抛异常后 DB 数据回滚（@SpringBootTest + H2 真实执行）
+         *      b) 事务内两次查询走同一连接（一级缓存生效）
+         *   3) 单测的契约表达：通过方法结构表达"这些 DB 操作应在一个事务内"——
+         *      一个 public 方法 + 内部连续 repo 调用，即约定原子性
+         *   4) 事务边界的单测盲区：
+         *      a) 同类自调用导致事务失效（AOP 代理绕过），单测无法发现——
+         *         必须集成测试覆盖（见 Spring 内幕块）
+         *      b) 传播行为（REQUIRES_NEW 嵌套调用）单测无法验证，
+         *         需容器级集成测试断言连接数/提交点
+         *
+         * 二、查询次数契约：Mockito verify 的性能语义
+         *   1) verify(repository, times(1)).save(...)：锁"一次请求一次写"，
+         *      防后续重构引入重复保存/循环保存（静默翻倍 DB 负载）
+         *   2) verifyNoMoreInteractions：锁"此方法不再查其他表"，
+         *      防止有人顺手加一次"额外查询"——单测即性能护栏
+         *   3) N+1 的单测防控盲区：service 返回 List<User> 后逐个调 getOrders()，
+         *      在 mock 下不报错——N+1 只能靠集成测试/Hibernate 统计发现
+         *   4) 团队知道改 repo 方法名会影响 service 单测——契约的可见性
+         =========================================================================
+         */
 }

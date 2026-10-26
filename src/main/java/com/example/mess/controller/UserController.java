@@ -171,60 +171,43 @@ public class UserController {
         return ApiResponse.success(null);
     }
 
-    /*
-     * =========================================================================
-     * 【HTTP/REST】RESTful 资源路由规范与 URL 设计（非可执行代码）
-     * =========================================================================
-     *
-     * 一、资源路由七字诀（项目规范速查）
-     *   1) 名词复数：/api/users 而非 /api/user 或 /api/getUserList
-     *   2) 层级表达归属：/api/users/{id}/orders 表示"某用户的订单"
-     *   3) HTTP 动词定操作：GET 读 / POST 建 / PUT 全量改 /
-     *      PATCH 部改 / DELETE 删——路径里不应出现动词
-     *   4) 筛选用 query：GET /api/users?role=admin&page=0&size=20
-     *   5) 版本前缀：/api/v1/users（重大破坏性变更用 v2 并行，见节四）
-     *   6) 稳定路径：路径段一旦发布即契约，废弃要走 deprecation 流程
-     *   7) 层级不过三：超过三层的嵌套说明该拆独立资源路由
-
-     * 二、本类端点的 REST 合规性体检
-     *   1) GET /api/users（分页查询）——合规：复数名词 + query 分页
-     *   2) POST /api/users（创建）——合规：动词隐含在 POST
-     *   3) GET /api/users/{id} —— 合规：子路径定位单资源
-     *   4) GET /api/users/username/{username} —— 有效性尚可，
-     *      REST 派推荐改为 /api/users?username=x（query 是筛选语义）；
-     *      路径参数表达"唯一标识定位"是可接受变体
-     *   5) PUT /api/users/{id} —— 合规：全量替换语义（与 PATCH 区别见下）
-     *   6) DELETE /api/users/{id} —— 合规：幂等删除
-     *   7) 一个偏离：删除返回 ApiResponse(false?) 的设计选择——
-     *      REST 派主张 204 No Content + 空体，
-     *      项目实用派返 200 + 业务 message，两者都有支持者
-
-     * 三、PUT 与 PATCH 的本质差异（新人最容易混）
-     *   1) PUT：全量替换——客户端发送的 body 即新状态，缺字段=置 null
-     *      实现：service.findById -> 把 DTO 完整覆盖 entity -> save
-     *   2) PATCH：部分更新——只改 body 里的字段，其他保持
-     *      实现：先 load entity，再按 body 里非 null 字段选择性覆盖
-     *   3) 本类用的是 PUT + UserDto 全字段，等价于全量替换——合规；
-     *      未来需求"只改邮箱"必须新增 PATCH，不能靠 PUT 少传字段
-     *   4) 客户端契约声明：PUT 必须 Body 自包含所有必填字段，
-     *      服务端做 Bean Validation 校验全字段责无旁贷
-
-     * 四、API 版本化策略四选一
-     *   1) URI 版本：/api/v1/users —— 直观、可路由、缓存友好（项目推荐）
-     *   2) Header 版本：Accept: application/vnd.myapp.v1+json
-     *      —— 干净，但客户端/文档/缓存成本高
-     *   3) Query 参数：?version=1 —— 灵活但污染契约
-     *   4) 无版本（设计约束式）：用兼容性规则（只加字段不删字段）
-     *      —— 适合内部小项目，规模化后难以兑现
-     *   5) 本项目现状无版本前缀；规模化演进起点：/api/v1/users
-
-     * 五、响应头来完整化 REST 语义（项目可补强清单）
-     *   1) 分页：Content-Range: users 0-19/100 或 Link 头 + next/prev
-     *   2) ETag：GET /api/users/{id} 可带 ETag，客户端再请求附
-     *      If-None-Match，命中返 304 Not Modified（省带宽）
-     *   3) Location：201 创建成功指向新资源 Location: /api/users/42
-     *   4) Allow：405 响应必须带 Allow: GET, POST（告诉客户端可用方法）
-     *   5) Cache-Control：GET 类接口显式声明 max-age=60 复用 CDN 缓存
-     * =========================================================================
-     */
+        /*
+         * =========================================================================
+         * 【数据库与SQL优化】控制层视角的查询复杂度与防穿透（非可执行代码）
+         * =========================================================================
+         *
+         * 一、控制层的查询复杂度红线
+         *   1) N 次串行：循环调 service.getOne() -> N 次 SQL，RT 随 N 线性放大
+         *      解法：service 批量方法 findAllById(List)，一条 IN 查询搞定
+         *   2) N+1 变体：controller 内"查列表 -> 逐个查关联" -> 经典 N+1
+         *      解法：service 用 EntityGraph 一次 JOIN 拿全（见 Repository 块）
+         *   3) 复杂条件拼接：按 5 个可选参数动态拼 SQL，
+         *      Repository 用 JpaSpecificationExecutor + Specification 组合
+         *      不要写十几个 findByNameAndEmailAndXxx 方法（笛卡尔爆炸）
+         *   4) 本类当前查询简单（分页 + 单 ID 查询），
+         *      预防性规范：新增端点时先在 OpenAPI 注释里写"预期 SQL 条数"
+    
+         * 二、请求量与 DB 压力的换算公式
+         *   1) QPS 到 DB QPS：每个请求触发 1-5 次 SQL，连接池 10 连接 SQL RT 10ms，
+         *      DB QPS 上限 = 连接数 x (1000 / RT) = 10 x 100 = 1000
+         *   2) 缓存命中率换算：命中率 90% 时，DB QPS 是入口 QPS 的 10%
+         *      10000 QPS 接口 -> DB 1000 QPS（可行）
+         *      命中率降至 50% -> DB 5000 QPS（连接池打爆）
+         *   3) 工程结论：缓存命中率是 DB 生死线，监控值低于阈值要立即告警
+         *   4) 本类现状：getUserById 走 @Cacheable，缓存击穿/穿透防护见 Service 块
+    
+         * 三、参数的"DB 安全设计"
+         *   1) 分页 size 上限：size=100 拒绝（参数校验层），
+         *      防一次性拉全表 -> DB 内存/网络/客户端全打爆
+         *   2) 模糊查询 like %x%：不走索引全表扫描，
+         *      高频搜索场景切 Elasticsearch（DB 只承担主键/精确查询）
+         *   3) 排序字段白名单：sort=username,desc 只接受白名单字段，
+         *      其余拒绝 -> 防注入 + 防全表 fileSort
+         *   4) ID 范围限制：bulk 操作 ids 数组长度上限（如 100），
+         *      IN (100 个 ID) 索引可用，IN (10000 个) 优化器可能放弃索引
+         *   5) 时间范围查询必须带上限：
+         *      where created_at > '2026-01-01' 没上限 = 全表扫，
+         *      强制要求 startTime + endTime 成对出现（参数校验层拦截）
+         =========================================================================
+         */
 }

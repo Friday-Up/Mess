@@ -141,80 +141,45 @@ public class SecurityConfig {
         return new InMemoryUserDetailsManager(user, admin);
     }
 
-    /*
-     * =========================================================================
-     * 【HTTP/REST】HTTP 认证协议与跨域策略（非可执行代码）
-     * =========================================================================
-     *
-     * 一、HTTP 无状态性是安全设计的起点
-     *   1) HTTP/1.1 本身无请求间记忆，认证态靠附加机制：
-     *      a) Cookie + Session：服务端存状态（内存/Redis），客户端持 Cookie
-     *      b) Token（Bearer）：服务端无状态，客户端持 Token
-     *      c) Basic：每次请求带 base64(user:pwd)——仅 HTTPS 可用
-     *      d) mTLS：双向证书认证，服务间通信（K8s 内网常用）
-     *   2) 本项目用表单登录 + Session（formLogin）：默认 Spring Session
-     *      存在内存 Map（开发用）；生产换 Redis/JDBC（spring-session-data-redis）
-     *   3) REST 派视角：表单登录偏 Web，纯 API 项目推荐 Token/Bearer
-     *      —— 但本项目 Hello/User 混用，表单是合理基础
-
-     * 二、Cookie 与 Session 的协议细节
-     *   1) Cookie 头格式：Set-Cookie: SESSIONID=abc; Path=/; HttpOnly; Secure; SameSite=Lax
-     *   2) 关键属性清单：
-     *      HttpOnly：JS 读不到，挡 XSS 偷 Cookie
-     *      Secure：仅 HTTPS 发送
-     *      SameSite=Lax/Strict：挡 CSRF（跨站请求不带 Cookie）
-     *      Path=/api：作用域限制
-     *   3) CSRF 与 Cookie 的因果关系：浏览器自动带 Cookie 是 CSRF 根源；
-     *      Token（localStorage）不受此攻击面 —— 这是 Token 派的核心论据
-     *   4) 本项目 disable CSRF：因为 REST API 无状态语义 + Token 计划；
-     *      若保留表单登录且要恢复 Session 验证，必须打开 CSRF
-     *   5) SameSite 现代浏览器默认 Lax，已显著降 CSRF 风险——
-     *      但服务端仍应显式配置，不依赖浏览器差异
-
-     * 三、CORS（Cross-Origin Resource Sharing）的协议交互
-     *   1) 同源策略：协议+域名+端口 三者一致才同源；
-     *      跨源请求默认被浏览器拦截（不是服务器拒绝）
-     *   2) 预检请求（Preflight）：复杂请求（带自定义头/PUT/DELETE/JSON Content-Type）
-     *      浏览器先发 OPTIONS 探路：
-     *      OPTIONS /api/users
-     *      Origin: https://app.example.com
-     *      Access-Control-Request-Method: POST
-     *      Access-Control-Request-Headers: Content-Type, Authorization
-     *   3) 服务端响应：
-     *      Access-Control-Allow-Origin: https://app.example.com（或 * 公共 API）
-     *      Access-Control-Allow-Methods: GET, POST, PUT, DELETE
-     *      Access-Control-Allow-Headers: Content-Type, Authorization
-     *      Access-Control-Allow-Credentials: true（与 * 互斥）
-     *      Access-Control-Max-Age: 3600（预检缓存）
-     *   4) 本项目 CORS 现状：未显式 .cors(...)——
-     *      同域开发下无碍；SPA（不同 origin）就需要：
-     *      .cors(cors -> cors.configurationSource(source)) 配置 Bean
-     *   5) 简单请求（GET/POST + 简单头）无预检，直接发请求 +
-     *      Response 带 CORS 头——前端拿不到响应头会被浏览器拦在 JS 层
-
-     * 四、跨域的替代方案与陷阱
-     *   1) 反向代理同源：Nginx 把前端与 API 放同一域名下（/api 转发后端），
-     *      彻底避免 CORS——生产环境最稳
-     *   2) 陷阱 1：Access-Control-Allow-Origin: * 与 credentials=true 不能并存
-     *      浏览器直接拒绝带 Cookie 的跨源请求
-     *   3) 陷阱 2：预检失败被网关吞掉——返回 405/404 而非正确的 CORS 头，
-     *      前端误以为权限问题，排查要从 OPTIONS 响应头开始
-     *   4) 陷阱 3：把 Allow-Headers 写死白名单，客户端加新自定义头
-     *      （如 X-Trace-Id）立即触发预检失败——设个通用策略
-
-     * 五、REST 安全清单（按协议层）
-     *   1) HTTPS 强制：HSTS 头（Strict-Transport-Security）防降级
-     *   2) 鉴权头校验：Authorization: Bearer <jwt> 在过滤器层鉴权
-     *   3) 限流：按 IP/API Key 限流（429 Too Many Requests），见网关或
-     *      Resilience4j RateLimiter
-     *   4) 请求体大小限制：server.max-http-header-size / max-swallow-size
-     *      防 DoS（超大包耗内存）
-     *   5) 输出脱敏：日志与响应里 password/token/手机号掩码（响应不外泄）
-     *   6) 安全头清单（Spring Security 默认开）：
-     *      X-Content-Type-Options: nosniff
-     *      X-Frame-Options: DENY（防点击劫持）
-     *      X-XSS-Protection（旧浏览器）
-     *      Content-Security-Policy（前端强约束）
-     * =========================================================================
-     */
+        /*
+         * =========================================================================
+         * 【数据库与SQL优化】安全配置与数据库的交互边界（非可执行代码）
+         * =========================================================================
+         *
+         * 一、认证数据源的分层与现状
+         *   1) 本类 InMemoryUserDetailsManager：内存用户存储（user/password、admin/admin）
+         *   2) 数据库迁移后的认证链路（演进方向）：
+         *      自定义 UserDetailsService -> 注入 UserRepository ->
+         *      findByUsername -> 构造 UserDetails（含密码哈希）-> Spring Security 比对
+         *   3) 关键点：
+         *      a) 密码不能明文存库：BCryptPasswordEncoder 哈希入库
+         *         cost 因子 >= 10，单次哈希 >100ms
+         *      b) 比对走 encoder.matches(rawPassword, hashed)，
+         *         不要自己 MD5/SHA1（彩虹表秒破）
+         *      c) 认证查询走索引：findByUsername 走唯一索引（毫秒级）——
+         *         若用户表上没有 username 索引，登录风暴会拖死 DB
+         *   4) 慢哈希防止暴力撞库：BCrypt 本身慢（10ms~200ms/次），
+         *      攻击者每秒只能试几十次——是安全设计而非性能缺陷
+    
+         * 二、登录风暴的数据库压力评估
+         *   1) 场景：恶意脚本 1000 QPS 尝试登录 -> findByUsername 1000 QPS 查 DB
+         *   2) 解法一（应用层）：登录失败 5 次后封 IP 15 分钟（Redis 计数）
+         *   3) 解法二（应用层）：账号维度限速，
+         *      同一 username 每 10 秒只允许 3 次尝试（Redis Key: login:fail:{username}）
+         *   4) 解法三（DB 层）：把用户名/哈希密码高频访问字段放 Redis 缓存，
+         *      DB 只承担未命中查询——登录查询读写比高，缓存收益明显
+         *   5) 注意缓存安全性：缓存哈希密码风险可控（本身已哈希），
+         *      但缓存全量 UserDetails 要评估权限变更失效策略（变更时主动 evict）
+    
+         * 三、审计日志的落库模式
+         *   1) 登录成功/失败事件 -> 审计表（login_audit）
+         *   2) 表设计要点：高写入、低查询、按时间分区（按日/月分表）
+         *   3) 写入路径选择：
+         *      a) 同步写：登录链路内 INSERT，强一致但拖慢登录
+         *      b) 异步写：ApplicationEventPublisher 发布 LoginEvent ->
+         *         @Async 监听器落库，登录即时返回
+         *      c) 队列：写 Kafka/RocketMQ -> 消费者批量入库（最终一致，吞吐最高）
+         *   4) 推荐组合：b 作为主路径（解耦），重要审计（如管理员操作）走 a
+         =========================================================================
+         */
 }

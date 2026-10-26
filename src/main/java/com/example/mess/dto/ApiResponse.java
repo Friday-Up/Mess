@@ -203,75 +203,27 @@ public class ApiResponse<T> {
         this.path = path;
     }
 
-    /*
-     * =========================================================================
-     * 【HTTP/REST】统一响应封装与状态码语义的工程权衡（非可执行代码）
-     * =========================================================================
-     *
-     * 一、"包体状态码"vs"HTTP 状态码"两种流派
-     *   1) 流派 A（严格 REST）：HTTP 状态码表达一切结果
-     *      2xx 成功 / 4xx 客户端错误 / 5xx 服务端错误，
-     *      包体只放数据（或 RFC 7807 Problem Details 见节四）
-     *   2) 流派 B（包体统一，本类）：HTTP 几乎总是 200，
-     *      包体 ApiResponse(success, message, data) 表达业务结果
-     *   3) 工程权衡对比：
-     *      严格 REST：语义纯正、CDN/网关/监控天然识别错误、
-     *         代价是前端/代理需按状态码分支解析，特殊状态处理分散
-     *      包体统一：前端解析一致、错误处理模式单一、
-     *         代价是 HTTP 级监控"错误率"指标失真（成功 200 但业务失败）
-     *   4) 混合派（推荐演进方向）：保留包体统一，
-     *      但让 HTTP 状态码与业务结果尽量对齐：
-     *      success=true -> 200/201；业务失败也用对应 4xx（404/409/400），
-     *      未知异常 500——本类全局处理器已部分实践（见 GlobalExceptionHandler 块）
-
-     * 二、本类字段的语义承诺与设计约束
-     *   1) success：布尔，业务级成败标志——注意"成功"定义：
-     *      getUserById 找到用户 = true；找不到应返 success=false + 404，
-     *      而不是 success=false + 200（语义割裂是常见反模式）
-     *   2) message：人类可读描述，前端提示用；机器处理应看 success/errorCode
-     *      不要用 message 做业务分支判断（文案可变，不稳定契约）
-     *   3) data：泛型业务数据，失败时通常 null —— 前端 null 判空必要
-     *   4) timestamp：响应生成时间（ISO 字符串），客户端可断言时间偏差
-     *      （时钟漂移检测/审计），但对缓存不友好（每次都变，ETAG 麻烦）
-     *   5) path：异常时回填请求路径，排障友好；非异常场景维护 null
-     *   6) errorCode（建议新增）：机器可读错误码（"USER_NOT_FOUND"），
-     *      让前端做精确分支（404 有多种业务含义：用户不存在/订单不存在）
-
-     * 三、响应头的配套设计（包体统一派更需要头）
-     *   1) X-Request-Id：每次请求分配 UUID 响应回给客户端，
-     *      客户端上报问题时带此 ID，日志秒定位
-     *   2) X-RateLimit-Remaining：限流余量提示，客户端据此节流
-     *   3) Deprecation: true + Sunset: <date>：废弃接口的标准化宣告
-     *   4) Link: <https://api.example.com/docs>; rel="help"：错误响应引导文档
-     *   5) Vary: Accept-Encoding：CDN 缓存维度（gzip 与未压缩分桶）
-
-     * 四、RFC 7807 Problem Details（包体错误的标准格式）
-     *   1) 严格 REST 派的错误响应标准：
-     *      Content-Type: application/problem+json
-     *      {
-     *        "type": "https://example.com/probs/user-not-found",
-     *        "title": "用户不存在",
-     *        "status": 404,
-     *        "detail": "ID 42 的用户不存在",
-     *        "instance": "/api/users/42"
-     *      }
-     *   2) 字段语义：type（问题类型 URI）/ title（简述）/ status（HTTP 码）
-     *      detail（细节）/ instance（出问题的请求 URI）
-     *   3) 可扩展字段（本类对应）：errorCode（扩展 type）/ timestamp（扩展）
-     *   4) Spring 支持：spring-web 的 ResponseEntity.problem(...).build()
-     *      或 ProblemDetail（Spring 6 原生支持）——演进路线清晰
-     *   5) 选型：内部 API 可继续 ApiResponse；对外 API 建议 Problem Details
-     *      或双模式（按 Accept 头切换）
-
-     * 五、泛型 ApiResponse<T> 的边界
-     *   1) T 是数据载荷类型，编译期类型安全
-     *   2) 运行时擦除：前端不知道 T 的具体类，文档（OpenAPI）补全类型
-     *   3) T 的类型一致性：success 时 data 是 UserDto；失败时是 null
-     *      —— 前端 TS 类型 data: UserDto | null 是正确表达
-     *   4) 分页响应：T = Page<UserDto>，包体含分页元数据——
-     *      包体统一派把"HTTP 头表达的分页信息"也放包体，契约自包含
-     *   5) 枚举/状态类响应：T = String（如"ok"）或专用 ResultType，
-     *      比裸 String 更有契约感
-     * =========================================================================
-     */
+        /*
+         * =========================================================================
+         * 【数据库与SQL优化】响应封装与批量返回的 SQL 成本（非可执行代码）
+         * =========================================================================
+         *
+         * 一、data 字段大小 = SQL 传输量
+         *   1) Page<UserDto> 含 20 条记录时包体约 1-2KB，
+         *      若每条 UserDto 含 Biography 等长字段，包体 10x 放大
+         *   2) 列表接口的字段裁剪：列表页只返 id/username/createdAt，
+         *      详情页才返全字段——传输量减半，序列化耗时减半
+         *   3) 只读列裁剪的关键：让 Repository 直接投影（见 UserDto 块），
+         *      而不是查全字段再转 DTO——"select *"与"投影"是 SQL 层的事
+         *
+         * 二、批量操作的统一响应形态
+         *   1) POST /api/users/batch 请求 10 条：全成功或全失败（@Transactional 原子性）
+         *      响应 data 仍为 ApiResponse(true, "批量创建成功", count=10)
+         *   2) 部分成功（207 Multi-Status，RFC 2518/9110）：
+         *      data = [{id: 1, success: true}, {username: "dup", success: false,
+         *      errorCode: "DUPLICATE"}]，前端按条目渲染结果
+         *   3) 大批量异步：返 202 Accepted + { jobId: "abc" }，客户端轮询任务状态
+         *      （任务表存 batch_job，消费者分批写 DB）
+         =========================================================================
+         */
 }

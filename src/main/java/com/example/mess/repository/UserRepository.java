@@ -91,58 +91,42 @@ public interface UserRepository extends JpaRepository<User, Long> {
 
 /*
  * =========================================================================
- * 【HTTP/REST】分页与排序的 HTTP 语义（非可执行代码）
+ * 【数据库与SQL优化】JPA 派生查询的 SQL 生成与索引设计（非可执行代码）
  * =========================================================================
  *
- * 一、分页参数的 REST 表达规范
- *   1) 位置选择：query 参数（?page=0&size=20）vs 路径（/page/0）
- *      —— REST 派共识用 query，因为"分页是筛选，不是资源"
- *   2) 参数命名约定：page / size（Spring Data 默认，0-based）
- *      别名：offset/limit（偏移式，SQL 友好）
- *      选择后全项目统一，不要混用（前端心智成本）
- *   3) 上限约束：size 必须设 max 限制（如 size=1000 拒绝），
- *      否则客户端一次请求把全表拖走——DoS 与 OOM 双重风险
- *   4) 排序：sort=username,desc&sort=createdAt,asc 多字段逗号串
- *      Spring Data Pageable 自动解析，方向默认 asc
+ * 一、派生查询方法的 SQL 翻译过程
+ *   1) findByUsername(String) -> PartTree 解析 ->
+ *      JPQL "select u from User u where u.username = ?1" ->
+ *      Hibernate 翻译为 SQL "select * from USER where username = ?"
+ *   2) existsByUsername -> Hibernate 优化为 exists 子查询
+ *      "select 1 from USER where username = ? limit 1"
+ *      只判断命中，不加载实体，比 findByUsername 快
+ *   3) 返回类型对 SQL 的影响：
+ *      Optional<User>：select 全字段
+ *      boolean：select 1 / count 优化路径
+ *      Stream：游标（需 close 释放 ResultSet 与连接，见并发块）
 
- * 二、分页响应的两种语义模型
- *   1) Page 模型（Spring Data 当前选用）：
- *      内容 + 元数据（totalElements / totalPages / number / size）
- *      代价：每次都执行 count(*) 查询（全表扫描）
- *   2) Slice 模型：内容 + hasNext 布尔（不查 count）
- *      代价：前端不显示总页数，只能"上一页/下一页"
- *   3) 决策树：
- *      前端需要页码跳转 / 总数展示 -> Page（接受 count 成本）
- *      无限滚动 / feed 流 / 列表式 UI -> Slice（首选，性能优）
- *   4) 深分页陷阱：LIMIT 10000000, 20 在 MySQL 上要扫前 1000 万行，
- *      解决：游标分页 WHERE id > ? ORDER BY id LIMIT 20（用索引）
+ * 二、索引设计的因果链（2019+ 复习）
+ *   1) 字段上的唯一约束自动建唯一索引（@Column(unique=true)）
+ *   2) 覆盖索引（Covering Index）：select 的列全在索引里免回表
+ *      示例：select username from USER where username=? -> 唯一索引覆盖，免主键回查
+ *   3) 最左前缀原则：复合索引 (a, b, c) 只对 a、(a,b)、(a,b,c) 有效
+ *      where b=? 不走索引——设计复合索引必须按查询模式排序
+ *   4) 函数失效：where lower(username)=? 不走索引，
+ *      改用函数索引（MySQL 8 支持）或存储时就 lowercase
+ *   5) 隐式类型转换：where varchar_col = 123（数字）-> MySQL 改转字符串列，
+ *      索引失效，性能断崖——参数绑定必须类型对齐（JPA 自动绑定天然避免）
 
- * 三、本接口在 REST 链路中的角色
- *   1) 签名 findAll(Pageable)：接口层把 HTTP query 参数透传到 DB，
- *      语义对齐——控制器不需要手工解析分页字符串
- *   2) 是弹簧的关键节点：PageableHandlerMethodArgumentResolver
- *      做协议到领域的翻译（query -> PageRequest），Repository 直接消费
- *   3) 排序安全：sort 字段名直接拼入 SQL，若客户端传不存在的字段
- *      会抛 PropertyReferenceException -> 全局处理器映射 400，
- *      拒绝非法字段比静默忽略更安全（避免看似成功的行为不一致）
- *   4) 跨字段排序：sort=email,asc 自动按实体字段名解析为
- *      列名 email——Spring Data 处理映射，无需手写 SQL 片段
-
- * 四、HTTP 缓存头与 Repository 行为的联动
- *   1) GET /api/users（分页列表）默认动态，缓存价值低
- *   2) GET /api/users/{id} 若是低频变更，可加 Cache-Control: max-age=60
- *      + ETag（基于实体 hash 或 version 字段）
- *   3) ETag 配合 If-None-Match：304 响应无 body，吞吐极大提升
- *   4) 条件更新：客户端 If-Match: <etag> → 服务端比较后决定
- *      是否执行更新，避免"读-改-写"并发覆盖（HTTP 乐观锁机制）
- *   5) 本项目未启用 ETag，最小可行；当 RT 与带宽是瓶颈时再引入
-
- * 五、HATEOAS（Hypertext As The Engine Of Application State）
- *   1) REST 成熟度模型（Richardson）第三级：响应中嵌超链接，
- *      客户端通过链接发现下一步动作而非硬编码 URL
- *   2) 示例：GET /api/users/1 响应带 _links: { self, orders, avatar }
- *   3) Spring 实现：Spring HATEOAS（EntityModel / CollectionModel）
- *   4) 本项目未启用 HATEOAS——企业内部 API 大多停在第二级
- *      （资源+动词+状态码），第三级成本高、收益场景窄（开放 API）
- * =========================================================================
+ * 三、N+1 查询的识别与根治
+ *   1) 症状：findAll() 返回 N 条，循环里访问关联属性触发 N 次额外 SQL
+ *   2) 日志辨别：spring.jpa.show-sql=true 看 select 语句数量；
+ *      或开 Hibernate 统计 spring.jpa.properties.hibernate.generate_statistics=true
+ *   3) 根治路径：
+ *      a) 实体图：@EntityGraph(attributePaths = "orders") 单查询 JOIN
+ *      b) 批量抓取：@BatchSize(size=50) 把 N 次 select 合并为 N/50 次 IN 查询
+ *      c) DTO 投影：直接 select 需要的字段（跨实体不建关联映射）
+ *      d) 本项目当前 User 无关联，天然无 N+1——加关联时的预防清单
+ *   4) 判定原则：关联仅在真的需要懒加载时用 @ManyToOne FetchType.LAZY
+ *      （默认 EAGER 是 N+1 的最大隐患源），读侧模型优先投影
+ =========================================================================
  */

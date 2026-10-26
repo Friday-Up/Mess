@@ -146,62 +146,46 @@ public class User {
         this.createdAt = createdAt;
     }
 
-    /*
-     * =========================================================================
-     * 【HTTP/REST】实体作为 REST 资源的字段契约与暴露控制（非可执行代码）
-     * =========================================================================
-     *
-     * 一、实体 ≠ API 资源：暴露控制的红线
-     *   1) 本实体字段：id / username / email / name / createdAt
-     *   2) 直接暴露实体的风险（本项目已规避）：
-     *      a) 框架元数据泄漏：JPA 实体带代理状态、版本字段，序列化会带上
-     *      b) 关联关系放大：@OneToMany 懒加载触发 N+1 与 LazyInitializationException
-     *      c) 内部字段暴露：password/salt 这类不该出 API 的字段被误序列化
-     *      d) 修改 DB 结构直接影响 API 契约——耦合面过大
-     *   3) UserDto 充当"契约守门员"，本项目这一层设计是正解
-     *   4) 反模式警示：用 @JsonIgnore 挡字段是"在实体上打补丁"，
-     *      长期看会积累一堆"这字段给这个接口看，那个接口不看"的注解债
-
-     * 二、字段命名的 REST 规范
-     *   1) JSON 字段 camelCase（id / username / createdAt）——本项目合规
-     *   2) 别 snake_case：与 Java 字段映射需 @JsonProperty("created_at")，
-     *      增加映射层复杂度，除非有强外部规范要求
-     *   3) 时间格式：ISO 8601（2026-10-23T14:30:00 或带时区 Z）
-     *      Java 侧 LocalDateTime + Jackson 默认即输出 ISO——本项目天然合规
-     *   4) 布尔命名：is+Adj（isAdmin）而非 active 标志位的"裸 bool"——
-     *      "是不是"关系比"是否激活"更直接表达 REST 语义
-     *   5) 字段名稳定性：发布后不可改名，只可加新字段；旧字段废弃用
-     *      文档 + 两个版本并行过渡（可加 @Deprecated 提示）
-
-     * 三、id 作为 URI 标识符的 REST 语义
-     *   1) GET /api/users/{id} 的 id 是"资源身份"，不是自增数字的泄密：
-     *      本项目暴露自增 id 的风险清单：
-     *      a) 业务量泄露：竞品可用 id 差值推算注册量（增长速度情报）
-     *      b) 枚举攻击：可通过遍历 id 拉取所有用户（本项目由 Security 保护）
-     *      c) 业务关联性：id 出现在日志/链路追踪里可能成为 PII 关联点
-     *   2) 实务解法：
-     *      小规模：保留自增 + 权限校验（本项目当前）
-     *      高安全：换 UUID 作为对外 id，内部 Long 关联
-     *      双 id 策略：数据库自增（内部）+ 公开 slug（外部可读 URL）
-     *   3) 路径参数 vs query：标识符（id）走 path，筛选条件（name=x）走 query
-     *   4) 软删除：DELETE 后真删 vs 字段 deletedAt——后者保留可追溯性，
-     *      REST 上看：删除后再 GET 同 id 应返回 404（需在查询过滤）
-
-     * 四、createdAt 字段的契约语义
-     *   1) 只读字段：客户端发的 createdAt 应被忽略（本 DTO 已有此约束）
-     *   2) 时区语义：DB 存 UTC，API 输出带时区或 UTC——跨区域部署必修
-     *   3) Last-Modified 联动：该字段可作为 HTTP Last-Modified 头来源，
-     *      支持 If-Modified-Since 条件请求（304 减量传输）
-     *   4) 与 updatedAt 区别：当前只有 createdAt；当业务需要"变更审计"
-     *      时 add updatedAt + @PreUpdate 自动更新——REST 契约新增字段即可
-
-     * 五、批量操作的 REST 设计（未来扩展参考）
-     *   1) 批量读：GET /api/users?ids=1,2,3 一次性返回多个资源
-     *   2) 批量创建：POST /api/users/batch body 为数组——事务边界争议大
-     *      （部分成功如何报错？推荐"全成功或全失败"+ 207 Multi-Status 表达）
-     *   3) 批量更新：PATCH /api/users body 为 [{id, patch}] 数组
-     *   4) 批量删除：DELETE /api/users?ids=1,2,3 —— 幂等可重试
-     *   5) 大批量异步：返回 202 Accepted + Location 指向任务资源
-     =========================================================================
-     */
+        /*
+         * =========================================================================
+         * 【数据库与SQL优化】实体映射与表结构设计的工程权衡（非可执行代码）
+         * =========================================================================
+         *
+         * 一、主键策略的选项与代价
+         *   1) IDENTITY（本项目当前）：数据库自增，INSERT 后才知道 ID
+         *      优点：简单、有序、B+树插入友好（页分裂少）
+         *      缺点：JPA 无法批量优化写（必须逐行 getGeneratedKeys），
+         *      分库分表时容易冲突，业务量被外界可推算
+         *   2) SEQUENCE：数据库序列，Hibernate 可批量预取 ID 后批量 INSERT（性能优）
+         *   3) UUID：全局唯一、无序（插入引发页分裂，B+树退化），
+         *      改用雪花 ID（Snowflake，有序+时间戳可读）是规模化标准
+         *   4) 项目决策：当前单表小规模 IDENTITY 足够；
+         *      扩到分库或写压力上来后切换 Snowflake（自实现或Leaf）
+         *   5) 主键的索引意义：InnoDB 主键即聚簇索引，
+         *      行数据物理上按主键排序存储——主键越小，二级索引占空间越小
+    
+         * 二、字段类型与长度约束的实用主义
+         *   1) varchar(50)/(100) 的 @Column(length) 影响：存储上限 + 索引内存占用
+         *   2) 过长浪费：varchar(255) 做用户名，索引读入内存冗余字节多
+         *   3) 过短踩坑：varchar(20) 存邮箱被 "very.long.email@...com" 撑爆报错
+         *   4) 时间字段类型选择：
+         *      LocalDateTime -> DATETIME（MySQL，8 字节）
+         *      需要时区：Instant + TIMESTAMP（UTC，存取自动转换）
+         *      高精度时间戳：BigInt 存 epochMillis（无 DB 函数友好性，但跨库一致）
+         *   5) NULL 语义：nullable=false 的字段要意识到 DB 层硬约束，
+         *      业务层忘记赋值会触发 DataIntegrityViolationException（500），
+         *      比业务校验后置——校验应在进入 Repository 前完成
+         *   6) 大字段（TEXT/BLOB）单独拆表：避免主表行变大引发冷热数据同页，
+         *      查询主表 IO 放大——本项目暂无大字段，是好的预防性设计
+    
+         * 三、表名保留字陷阱（本类的典型问题）
+         *   1) @Table(name = "USER")：USER 在多数数据库是保留字（H2/Oracle/Postgres）
+         *   2) H2 直接报错或需加引号；MySQL 一度允许但 8.0 后部分模式敏感
+         *   3) 标准解法：加前缀或复数 t_user / users（真实项目命名规范）
+         *   4) 如果不想改实体：@Table(name = "`USER`")（反引号，MySQL 专属），
+         *      跨方言时改用全局命名策略 spring.jpa.hibernate.naming.physical-strategy
+         *   5) 本项目开发环境能跑因为 H2 默认模式宽容，
+         *      迁移到 MySQL 生产前应统一加表名前缀（一笔技术债）
+         =========================================================================
+         */
 }

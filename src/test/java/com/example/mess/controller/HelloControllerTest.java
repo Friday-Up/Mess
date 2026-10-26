@@ -175,60 +175,25 @@ class HelloControllerTest {
         assertEquals("Hello, SpringBoot! (via POST)", response.getData());
     }
 
-    /*
-     * =========================================================================
-     * 【HTTP/REST】HTTP 方法测试矩阵与安全方法验证（非可执行代码）
-     * =========================================================================
-     *
-     * 一、本类覆盖的 HTTP 方法测试维度
-     *   1) GET /hello（默认参数）-> 200 + 包体 data="Hello, World!"
-     *   2) GET /hello?name=Spring -> 200 + 含请求参数字符串
-     *   3) GET /hello/advanced -> 高版本问候端点（多参数组合）
-     *   4) POST /hello -> 200 + "(via POST)" 标识
-     *   5) 缺失维度建议补强（REST 视角）：
-     *      GET 不支持请求体（应 400 或忽略）
-     *      HEAD /hello（同 GET 但无包体）
-     *      OPTIONS /hello（返 Allow 头）
-     *      不存在的路由 -> 404
-     *      方法不匹配 -> 405 + Allow 头
-
-     * 二、安全方法（Safe Method）的契约验证
-     *   1) GET 必须是只读：测试断言 "GET 后 Repository 状态不变"
-     *      （verify(repo, never()).save(any())）——防止把写操作混入 GET
-     *   2) GET 必须可缓存：断言响应带 Cache-Control 头（项目可配置）
-     *   3) GET 必须可重复：相同请求两次响应相同字符串——
-     *      除非显式声明"内容随时间变"，否则违反 = 契约破损
-     *   4) GET 请求体语义：框架默认忽略 GET body（规范不鼓励），
-
-     * 三、方法与状态码的交叉矩阵（防止误返回）
-     *   1) GET 成功：200（带包体）或 204（明确空体）
-     *   2) GET 失败：4xx（不返 5xx 给客户端参数问题）
-     *   3) POST 创建成功：201 + Location 头（项目当前 200 可接受，演进改 201）
-     *   4) POST 业务失败：4xx + 包体 errorCode
-     *   5) PUT 成功：200（返更新后资源）或 204（空体）
-     *   6) DELETE 成功：204（推荐）或 200（带 message）
-     *   7) 未预期的 5xx：测试不应覆盖具体异常，只测兜底路径返回包体格式
-
-     * 四、HTTP 头的契约测试用例清单
-     *   1) Content-Type 断言：application/json（编码不指定时默认 UTF-8）
-     *   2) Cache-Control：GET /hello 返 max-age=60（若启用）
-     *   3) Vary：Accept-Encoding（若启用 gzip）
-     *   4) CORS 头：跨源请求 OPTIONS 预检验证 Allow-Origin 等头
-     *   5) X-Request-Id：每个响应必带，与请求头传入的回显一致
-     *   6) Security 头：X-Content-Type-Options: nosniff（Spring Security 默认开）
-     *   7) 断言写法示例：
-     *      .andExpect(header().string("Content-Type", "application/json"))
-     *      .andExpect(header().exists("X-Request-Id"))
-
-     * 五、MockMvc 与真实 HTTP 的差异（决策使用场景）
-     *   1) MockMvc 走的"对象模拟"路径，不发真 TCP，不解析真 HTTP 报文
-     *   2) 测不到的：Content-Length 准确性 / chunked encoding / gzip 透明 / 
-     *      真实连接超时 / TLS 协商
-     *   3) 能测到的：路由 / 状态码 / 包体 / 头 / Filter 链 / 序列化
-     *   4) 何时换 TestRestTemplate + RANDOM_PORT：
-     *      需要验证 HTTP 协议级行为时（如 CORS 预检真 OPTIONS）
-     *      或部署前需要真容器冒烟时
-     *   5) 本类日常用 MockMvc 毫秒级，CI 烟测加 1-2 个真实端点用例即可
-     * =========================================================================
-     */
+        /*
+         * =========================================================================
+         * 【数据库与SQL优化】零 DB 接口的测试与 DB 性能对照基线（非可执行代码）
+         * =========================================================================
+         *
+         * 一、本类为何不需要 DB 相关测试
+         *   1) hello 系列零 DB 依赖：service.hello() 不查库，
+         *      @MockBean UserService 后完全是内存操作
+         *   2) 测试特征：纯 MockMvc + Mockito，毫秒级运行，无容器/无数据源
+         *   3) 这类测试的价值是回归保护：路由/参数绑定/序列化不被改崩
+         *      DB 行为由 Repository/Service 层负责——测试金字塔分层原则
+         *
+         * 二、零 DB 基线的性能对照价值
+         *   1) hello 接口 RT 约 1-2ms 是全链路基线：总 RT 减去它就是 DB/业务耗时
+         *   2) 同功能两套实现对比：缓存命中路径 vs 直查 DB 路径，
+         *      RT 差 10-100 倍——性能回归测试的参照系
+         *   3) 压测口径：零 DB 接口 QPS 上限是框架天花板（Tomcat 线程 + 序列化），
+         *      DB 接口的天花板是连接池 + 索引——分层定位瓶颈
+         *   4) 上线 MySQL（磁盘 + 网络）比 H2 性能差 5-10 倍——压测必须在真库进行
+         =========================================================================
+         */
 }
