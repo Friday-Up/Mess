@@ -91,39 +91,27 @@ public interface UserRepository extends JpaRepository<User, Long> {
 
 /*
  * =========================================================================
- * 【JVM内存管理与GC调优】JPA 代理的类加载与 Metaspace 控制（非可执行代码）
+ * 【可观测性与生产运维】数据访问层的慢查询观测与容量水位（非可执行代码）
  * =========================================================================
  *
- * 一、Spring Data JPA 启动时 JIT 生成了多少类
- *   1) 启动期：Spring 为本接口创建 SimpleJpaRepository 子类代理 + 
- *      Hibernate 为每个实体生成 Metamodel 类 + 派生查询 JPQL->SQL ->
- *      编译期生成 ByteBuddy/CGLIB 字节码 -> 加载到 Metaspace
- *   2) 类的元数据不占堆，而占 Metaspace（堆外本地内存）：
- *      默认 -XX:MaxMetaspaceSize 不限——长期运行理论上可涨到耗尽本地内存
- *   3) Spring 动态代理引发的"类加载泄漏"：热部署/重新部署留下旧类
- *      元数据，Metaspace 只增不减——grep ClassLoader 数量诊断泄漏
+ * 一、慢查询是 DB 层第一观测对象
+ *   1) 现代三件套：DB 侧 slow log（long_query_time）+
+ *      应用侧 JDBC 日志（hibernate.session.events log）+
+ *      APM 的 DB Span——三处对账能分清"DB 慢"还是"应用到 DB 网络慢"
+ *   2) 慢查询治理闭环：慢日志 -> 每周 TopN 评审 -> 加索引/改写 ->
+ *      下周验证是否消失——不做闭环，慢日志只是越攒越大的文件
+ *   3) 本接口的监控点：findByUsername 有唯一约束，
+ *      每次调用 RT 应 <5ms，超过即异常信号——
+ *      为高频方法建独立指标比全集平均更有判别力
  *
- * 二、Arthas 视角看本接口
- *   1) arthas sc -d UserRepository：查看被生成的代理类名（$Proxy / $$Enhancer），
- *      类加载器指向 ApplicationContextClassLoader
- *   2) 派生查询的 JIT 内联：findByUsername 与同名 native query 调用频次
- *      一致时性能无差——别为"方法名太长会慢"的传闻去重写 SQL
- *   3) 代理类的内存占用估算：本接口 12 个方法 -> 代理类几百 KB，
- *      与堆使用相比可忽略——别为"代理慢"过早手写实现
- *   4) 真实瓶颈永远在 SQL 执行：执行计划、索引、网络 RT——
- *      JVM 类加载通常不是热点（除非启动慢或类加载泄漏）
- * 三、Native Query 与派生 Query 的 JIT 视角差异
- *   1) 派生 query：方法名 -> JPQL -> SQL 在启动期一次性翻译，
- *      运行时直接使用缓存 SQL 字符串——运行时无 JIT 差异
- *   2) 热点永远在 JDBC 结果集映射（ResultSet -> Entity 的反射/字节码路径）：
- *      select 不要的列不仅浪费 SQL 传输，也浪费结果映射 CPU
- *
- * 四、连接池 Hikari 的 JVM 视角
- *   1) Hikari 连接持有真实数据库 Connection（堆外 Socket + 堆内包装对象）：
- *      池大小上限同时决定堆内对象数与线程并发数——
- *      配置不当要么内存不够，要么线程饥饿
- *   2) 连接泄漏诊断：Hikari 自带 leakDetectionThreshold：
- *      借出超阈值未还即告警——堆外资源泄漏无法靠 GC 发现，要靠监控
- *
+ * 二、连接池与容量水位
+ *   1) Hikari 暴露指标：active/idle/pending/wait——
+ *      pending 持续 >0 即容量不足，wait 时间是排队延迟，两者都该有告警
+ *   2) 水位比速率更重要：QPS 高但 RT 稳是健康；RT 上涨但 QPS 平 = 
+ *      容量到顶的前兆——监控要看 RT 拐点，不是只看 CPU/QPS 顶部
+ *   3) 熔断与降级：DB 持续超时的下一步是熔断（保护 DB）+
+ *      读路径降级到缓存——可观测的价值是让降级在"人决策之前"由系统先做
+ *   4) 容量文档化：每个表行数/增长率/索引数入容量看板，
+ *      季度评审——"突然慢"大多是渐变问题没被观测到，不是突发事件
  =========================================================================
  */
